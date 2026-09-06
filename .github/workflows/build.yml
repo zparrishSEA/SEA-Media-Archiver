@@ -43,7 +43,7 @@ jobs:
           archive: false
 
       - name: Upload Windows Artifact to Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: "Output/SEA_Media_Archiver_Setup.exe"
@@ -100,7 +100,7 @@ jobs:
 
       # --- EXISTING: Only create a formal release if a tag is pushed ---
       - name: Upload macOS Artifact to Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: SEA-Media-Archiver-macOS.zip
