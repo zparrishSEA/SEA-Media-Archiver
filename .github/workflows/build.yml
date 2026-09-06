@@ -1,0 +1,84 @@
+name: Build and Release SEA Media Archiver
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build Executable with PyInstaller
+        run: |
+          pyinstaller --clean SEA_Media_Archiver_WIN.spec
+
+      - name: Upload Windows Artifact to Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/SEA Media Archiver.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Generate my_icon.icns from PNG
+        run: |
+          mkdir my_icon.iconset
+          sips -z 16 16     my_icon.png --out my_icon.iconset/icon_16x16.png
+          sips -z 32 32     my_icon.png --out my_icon.iconset/icon_16x16@2x.png
+          sips -z 32 32     my_icon.png --out my_icon.iconset/icon_32x32.png
+          sips -z 64 64     my_icon.png --out my_icon.iconset/icon_32x32@2x.png
+          sips -z 128 128   my_icon.png --out my_icon.iconset/icon_128x128.png
+          sips -z 256 256   my_icon.png --out my_icon.iconset/icon_128x128@2x.png
+          sips -z 256 256   my_icon.png --out my_icon.iconset/icon_256x256.png
+          sips -z 512 512   my_icon.png --out my_icon.iconset/icon_256x256@2x.png
+          sips -z 512 512   my_icon.png --out my_icon.iconset/icon_512x512.png
+          sips -z 1024 1024 my_icon.png --out my_icon.iconset/icon_512x512@2x.png
+          iconutil -c icns my_icon.iconset -o my_icon.icns
+
+      - name: Build macOS App Bundle with PyInstaller
+        run: |
+          pyinstaller --clean SEA_Media_Archiver_MAC.spec
+
+      - name: Package macOS Zip with Launch Script
+        run: |
+          cd dist
+          zip -r ../SEA-Media-Archiver-macOS.zip "SEA Media Archiver.app" "../Launch_App.command"
+
+      - name: Upload macOS Artifact to Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: SEA-Media-Archiver-macOS.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

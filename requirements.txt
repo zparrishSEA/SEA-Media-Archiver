@@ -1,0 +1,8 @@
+customtkinter
+Pillow
+browser-cookie3
+openai-whisper
+pyinstaller
+requests
+yt-dlp
+youtube-transcript-api
