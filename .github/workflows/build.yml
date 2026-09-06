@@ -33,7 +33,7 @@ jobs:
       # --- NEW: Compile the Inno Setup script ---
       - name: Compile Inno Setup Installer
         run: |
-          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 
       # --- UPDATED: Upload the new Setup.exe instead of the raw .exe ---
       - name: Upload Windows Artifact to Actions Run
