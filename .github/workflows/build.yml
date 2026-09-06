@@ -30,12 +30,25 @@ jobs:
         run: |
           pyinstaller --clean SEA_Media_Archiver_WIN.spec
 
-      # --- NEW: Always upload the .exe to the Actions page without zipping ---
+      # --- NEW: Compile the Inno Setup script ---
+      - name: Compile Inno Setup Installer
+        run: |
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+
+      # --- UPDATED: Upload the new Setup.exe instead of the raw .exe ---
       - name: Upload Windows Artifact to Actions Run
         uses: actions/upload-artifact@v7
         with:
-          path: "dist/SEA Media Archiver.exe"
+          path: "Output/SEA_Media_Archiver_Setup.exe"
           archive: false
+
+      - name: Upload Windows Artifact to Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: "Output/SEA_Media_Archiver_Setup.exe"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # --- EXISTING: Only create a formal release if a tag is pushed ---
       - name: Upload Windows Artifact to Release
