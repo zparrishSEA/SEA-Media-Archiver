@@ -30,12 +30,12 @@ jobs:
         run: |
           pyinstaller --clean SEA_Media_Archiver_WIN.spec
 
-      # --- NEW: Always upload the .exe to the Actions page ---
+      # --- NEW: Always upload the .exe to the Actions page without zipping ---
       - name: Upload Windows Artifact to Actions Run
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: SEA-Media-Archiver-Windows
           path: "dist/SEA Media Archiver.exe"
+          archive: false
 
       # --- EXISTING: Only create a formal release if a tag is pushed ---
       - name: Upload Windows Artifact to Release
@@ -83,15 +83,16 @@ jobs:
 
       - name: Package macOS Zip with Launch Script
         run: |
+          cp Launch_App.command dist/
           cd dist
-          zip -r ../SEA-Media-Archiver-macOS.zip "SEA Media Archiver.app" "../Launch_App.command"
+          zip -r ../SEA-Media-Archiver-macOS.zip "SEA Media Archiver.app" "Launch_App.command"
 
-      # --- NEW: Always upload the .zip to the Actions page ---
+      # --- NEW: Always upload the .zip to the Actions page without double-zipping ---
       - name: Upload macOS Artifact to Actions Run
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: SEA-Media-Archiver-macOS
           path: SEA-Media-Archiver-macOS.zip
+          archive: false
 
       # --- EXISTING: Only create a formal release if a tag is pushed ---
       - name: Upload macOS Artifact to Release
