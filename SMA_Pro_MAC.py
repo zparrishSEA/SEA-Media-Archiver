@@ -1255,10 +1255,11 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                 with open(srt_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
 
-                # Split SRT into individual subtitle blocks
+                # Split SRT into individual blocks
                 blocks = re.split(r'\n\s*\n', content.strip())
-                filtered_blocks = []
+                filtered_srt_blocks = []
                 clean_dialogue = []
+                last_srt_text = ""
 
                 for block in blocks:
                     lines = [l.strip() for l in block.splitlines() if l.strip()]
@@ -1276,38 +1277,62 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                         start_sub_sec = self.parse_srt_time(time_parts[0])
                         end_sub_sec = self.parse_srt_time(time_parts[1])
 
-                        # Skip blocks outside of our active clip range
+                        # 1. Skip blocks outside of our active clip timestamp range
                         if use_clip:
                             if end_sub_sec < clip_start_sec or start_sub_sec > clip_end_sec:
                                 continue
 
-                        filtered_blocks.append(lines)
+                            # Shift the timestamps back to 0 so they align with the clipped video
+                            start_sub_sec = max(0.0, start_sub_sec - clip_start_sec)
+                            end_sub_sec = max(0.0, end_sub_sec - clip_start_sec)
 
-                        # Extract clean dialogue lines for .txt file
+                        # Re-format the time line to strict SRT standard using our existing helper
+                        new_start_str = self.format_whisper_timestamp(start_sub_sec)
+                        new_end_str = self.format_whisper_timestamp(end_sub_sec)
+                        time_line = f"{new_start_str} --> {new_end_str}"
+
+                        # Extract text lines below the time header
                         text_lines = lines[time_line_idx + 1:]
-                        for line in text_lines:
-                            line = re.sub(r'<[^>]+>', '', line)
-                            if line.isupper():
-                                line = line.capitalize()
-                            if clean_dialogue and clean_dialogue[-1] == line:
-                                continue
-                            if ">>" in line and clean_dialogue and clean_dialogue[-1] != "":
-                                clean_dialogue.append("")
-                            clean_dialogue.append(line)
+                        cleaned_block_text_lines = []
 
-                # Write out filtered SRT
+                        for line in text_lines:
+                            clean_line = re.sub(r'<[^>]+>', '', line).strip()
+                            if clean_line:
+                                cleaned_block_text_lines.append(clean_line)
+
+                        full_block_text = " ".join(cleaned_block_text_lines)
+
+                        # 2. SRT Deduplication: Only add block if text is different from previous SRT block
+                        if full_block_text and full_block_text != last_srt_text:
+                            filtered_srt_blocks.append((time_line, cleaned_block_text_lines))
+                            last_srt_text = full_block_text
+
+                        # 3. TXT Transcript Generation (Proven Working Logic)
+                        for line in cleaned_block_text_lines:
+                            display_line = line.capitalize() if line.isupper() else line
+                            if not clean_dialogue or clean_dialogue[-1] != display_line:
+                                if ">>" in display_line and clean_dialogue and clean_dialogue[-1] != "":
+                                    clean_dialogue.append("")
+                                clean_dialogue.append(display_line)
+
+                # Write out filtered .srt with clean sequential numbering (1, 2, 3...)
                 if self.srt_var.get():
                     with open(srt_path, 'w', encoding='utf-8') as f:
-                        for idx, lines in enumerate(filtered_blocks, start=1):
-                            f.write(f"{idx}\n")
-                            f.write("\n".join(lines[lines.index(next(l for l in lines if '-->' in l)):]) + "\n\n")
+                        for idx, (t_line, txt_lines) in enumerate(filtered_srt_blocks, start=1):
+                            f.write(f"{idx}\n{t_line}\n" + "\n".join(txt_lines) + "\n\n")
                 else:
-                    os.remove(srt_path)
+                    if os.path.exists(srt_path):
+                        os.remove(srt_path)
 
-                # Write out filtered TXT transcript
+                # Write out filtered .txt
                 if self.transcript_var.get():
                     with open(txt_path, 'w', encoding='utf-8') as f:
                         f.write("\n".join(clean_dialogue))
+
+        except Exception as e:
+            self.after(0, lambda err=str(e): self.status_label.configure(text=f"Transcript error: {err}", text_color="red"))
+            self.after(0, lambda: self.progress_bar.stop())
+            self.after(0, lambda: self.progress_bar.configure(mode="determinate"))
 
         except Exception as e:
             self.after(0, lambda err=str(e): self.status_label.configure(text=f"Transcript error: {err}", text_color="red"))
@@ -1365,6 +1390,8 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
 
             for line in process.stdout:
                 console_output_logs.append(line.strip())
+
+                # Capture the video title for folder creation
                 if "[download] Destination:" in line:
                     video_title = os.path.basename(os.path.dirname(line.split("[download] Destination:")[-1].strip()))
                 elif "has already been downloaded" in line:
@@ -1374,12 +1401,35 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                     match = re.search(r'\[Merger\] Merging formats into "(.*?)"', line)
                     if match: video_title = os.path.basename(os.path.dirname(match.group(1).strip()))
 
+                # --- DYNAMIC STATUS PARSING ---
+
+                # 1. Handle Active Downloading
                 if "[download]" in line and "%" in line:
                     match = re.search(r'([0-9.]+)%', line)
                     if match:
                         percent = float(match.group(1)) / 100.0
                         self.after(0, lambda p=percent: self.progress_bar.set(p))
-                        self.after(0, lambda p=percent: self.status_label.configure(text=f"Downloading... {int(p * 100)}%"))
+
+                        if percent < 1.0:
+                            self.after(0, lambda p=percent: self.status_label.configure(text=f"Downloading... {int(p * 100)}%"))
+                        else:
+                            self.after(0, lambda: self.status_label.configure(text="Download 100%. Handing over to media processor..."))
+
+                # 2. Handle FFmpeg Post-Processing Phases
+                elif "[Merger]" in line:
+                    self.after(0, lambda: self.status_label.configure(text="FFmpeg: Merging video and audio streams..."))
+
+                elif "[ExtractAudio]" in line:
+                    self.after(0, lambda: self.status_label.configure(text="FFmpeg: Extracting and compiling audio track..."))
+
+                elif "[VideoRemuxer]" in line or "[Remuxer]" in line:
+                    self.after(0, lambda: self.status_label.configure(text="FFmpeg: Remuxing into final video format..."))
+
+                elif "[SubtitlesConvertor]" in line or "Converting subtitles" in line:
+                    self.after(0, lambda: self.status_label.configure(text="Processing subtitles and captions..."))
+
+                elif "Fixing" in line or "[Metadata]" in line:
+                    self.after(0, lambda: self.status_label.configure(text="Writing final file metadata..."))
 
             process.wait()
 
