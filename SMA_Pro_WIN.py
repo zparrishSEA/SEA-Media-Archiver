@@ -1324,7 +1324,6 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
 
             for line in process.stdout:
                 console_output_logs.append(line.strip())
-                print(line.strip())
                 if "[download] Destination:" in line:
                     video_title = os.path.basename(os.path.dirname(line.split("[download] Destination:")[-1].strip()))
                 elif "has already been downloaded" in line:
