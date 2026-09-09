@@ -177,7 +177,7 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
     def build_setup_interface(self):
         self.setup_title = ctk.CTkLabel(self.setup_frame, text="Initializing System Tooling", font=ctk.CTkFont(size=24, weight="bold"))
         self.setup_title.grid(row=0, column=0, pady=(180, 10))
-        self.setup_subtitle = ctk.CTkLabel(self.setup_frame, text="Downloading required media modules silently. Please wait...", text_color="gray")
+        self.setup_subtitle = ctk.CTkLabel(self.setup_frame, text="Downloading required media modules. Please wait...", text_color="gray")
         self.setup_subtitle.grid(row=1, column=0, pady=(0, 30))
         self.setup_progress = ctk.CTkProgressBar(self.setup_frame, width=450)
         self.setup_progress.grid(row=2, column=0, pady=10)
@@ -186,37 +186,55 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         self.setup_status.grid(row=3, column=0, pady=5)
 
     def check_and_route_user(self):
-        if not os.path.exists(YTDLP_BIN) or not os.path.exists(FFMPEG_BIN) or not os.path.exists(FFPROBE_BIN):
-            self.hide_all_frames()
-            self.setup_frame.grid(row=0, column=0, sticky="nsew")
-            self.setup_progress.start()
-            threading.Thread(target=self.silent_installer_worker, daemon=True).start()
-        else:
-            self.show_auth_screen()
+        """Always routes through the setup screen on startup to fetch fresh binary tools."""
+        self.hide_all_frames()
+        self.setup_frame.grid(row=0, column=0, sticky="nsew")
+        self.setup_progress.start()
+        threading.Thread(target=self.silent_installer_worker, daemon=True).start()
 
     def silent_installer_worker(self):
+        """Downloads and overwrites yt-dlp, FFmpeg, and FFprobe on every application launch."""
         try:
-            if not os.path.exists(YTDLP_BIN):
-                self.after(0, lambda: self.setup_status.configure(text="Acquiring yt-dlp core architecture..."))
-                urllib.request.urlretrieve(YTDLP_URL, YTDLP_BIN)
+            # 1. Always download the latest yt-dlp binary
+            self.after(0, lambda: self.setup_status.configure(text="Acquiring latest yt-dlp core architecture..."))
+            urllib.request.urlretrieve(YTDLP_URL, YTDLP_BIN)
 
-            if not os.path.exists(FFMPEG_BIN) or not os.path.exists(FFPROBE_BIN):
-                self.after(0, lambda: self.setup_status.configure(text="Acquiring media components (FFmpeg & FFprobe)..."))
-                zip_temp_path = os.path.join(APP_DATA_DIR, "ffmpeg_temp.zip")
-                urllib.request.urlretrieve(FFMPEG_URL, zip_temp_path)
-                self.after(0, lambda: self.setup_status.configure(text="Configuring execution modules..."))
-                with zipfile.ZipFile(zip_temp_path, 'r') as zip_ref:
-                    for file_info in zip_ref.infolist():
-                        if file_info.filename.endswith("ffmpeg.exe"):
-                            with zip_ref.open(file_info) as src, open(FFMPEG_BIN, "wb") as dst: dst.write(src.read())
-                        elif file_info.filename.endswith("ffprobe.exe"):
-                            with zip_ref.open(file_info) as src, open(FFPROBE_BIN, "wb") as dst: dst.write(src.read())
-                if os.path.exists(zip_temp_path): os.remove(zip_temp_path)
+            # 2. Always download the latest FFmpeg & FFprobe archive
+            self.after(0, lambda: self.setup_status.configure(text="Acquiring latest media components (FFmpeg & FFprobe)..."))
+            zip_temp_path = os.path.join(APP_DATA_DIR, "ffmpeg_temp.zip")
+            urllib.request.urlretrieve(FFMPEG_URL, zip_temp_path)
 
+            # 3. Extract and overwrite existing binaries in AppData
+            self.after(0, lambda: self.setup_status.configure(text="Configuring execution modules..."))
+            with zipfile.ZipFile(zip_temp_path, 'r') as zip_ref:
+                for file_info in zip_ref.infolist():
+                    if file_info.filename.endswith("ffmpeg.exe"):
+                        with zip_ref.open(file_info) as src, open(FFMPEG_BIN, "wb") as dst:
+                            dst.write(src.read())
+                    elif file_info.filename.endswith("ffprobe.exe"):
+                        with zip_ref.open(file_info) as src, open(FFPROBE_BIN, "wb") as dst:
+                            dst.write(src.read())
+
+            # Cleanup temporary zip file
+            if os.path.exists(zip_temp_path):
+                os.remove(zip_temp_path)
+
+            # Transition to authentication screen upon success
             self.after(0, lambda: [self.setup_progress.stop(), self.show_auth_screen()])
+
         except Exception as e:
-            self.after(0, lambda e=e: messagebox.showerror("Setup Failure", f"Critical dependency error:\n{str(e)}"))
-            self.after(0, lambda: self.setup_status.configure(text="Setup aborted.", text_color="red"))
+            # Fallback: If offline or download fails, check if we already have working binaries locally
+            if os.path.exists(YTDLP_BIN) and os.path.exists(FFMPEG_BIN) and os.path.exists(FFPROBE_BIN):
+                self.after(0, lambda: [
+                    self.setup_progress.stop(),
+                    self.show_auth_screen()
+                ])
+            else:
+                self.after(0, lambda e=e: messagebox.showerror(
+                    "Setup Failure",
+                    f"Unable to download required tools on launch and no local files were found:\n{str(e)}"
+                ))
+                self.after(0, lambda: self.setup_status.configure(text="Setup aborted.", text_color="red"))
 
     def show_auth_screen(self):
         self.hide_all_frames()
@@ -946,12 +964,19 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         self.top_bar.grid_columnconfigure(1, weight=0)
         self.top_bar.grid_columnconfigure(2, weight=1)
 
-        back_btn = ctk.CTkButton(self.top_bar, text="⬅ Back to Menu", command=self.show_mode_selection, width=130, height=32, fg_color="#444444", hover_color="#555555")
+        # Back Button on the left
+        back_btn = ctk.CTkButton(
+            self.top_bar,
+            text="⬅ Back to Menu",
+            command=self.show_mode_selection,
+            width=130,
+            height=32,
+            fg_color="#444444",
+            hover_color="#555555"
+        )
         back_btn.grid(row=0, column=0, sticky="nw")
 
-        self.update_btn = ctk.CTkButton(self.top_bar, text="Update Engine", command=self.update_ytdlp, width=130, height=32, fg_color="#444444", hover_color="#555555")
-        self.update_btn.grid(row=0, column=2, sticky="ne")
-
+        # Centered Logo
         try:
             logo_file_path = resource_path("logo.png")
             raw_image = Image.open(logo_file_path)
@@ -1105,6 +1130,25 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         except Exception:
             self.after(0, lambda: threading.Thread(target=self.download_worker, args=(url,), daemon=True).start())
 
+    def parse_srt_time(self, time_str):
+        """Converts timestamp strings (HH:MM:SS or HH:MM:SS,mmm) into float seconds."""
+        time_str = time_str.strip().replace('.', ',')
+        parts = time_str.split(':')
+        if len(parts) == 3:
+            h, m, s = parts
+        elif len(parts) == 2:
+            h = 0
+            m, s = parts
+        else:
+            return 0.0
+
+        if ',' in s:
+            sec, msec = s.split(',')
+        else:
+            sec, msec = s, '0'
+
+        return int(h) * 3600 + int(m) * 60 + int(sec) + (int(msec) / 1000.0)
+
     def format_whisper_timestamp(self, seconds):
         hrs = int(seconds // 3600)
         mins = int((seconds % 3600) // 60)
@@ -1116,6 +1160,19 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         try:
             srt_files = [f for f in os.listdir(folder_path) if f.lower().endswith(".srt")]
 
+            # Determine if the clip section feature is currently active
+            use_clip = self.use_time_var.get()
+            clip_start_sec = 0.0
+            clip_end_sec = float('inf')
+
+            if use_clip:
+                start_str = self.start_entry.get().strip() or "00:00:00"
+                end_str = self.end_entry.get().strip()
+                clip_start_sec = self.parse_srt_time(start_str)
+                if end_str:
+                    clip_end_sec = self.parse_srt_time(end_str)
+
+            # --- Whisper Local AI Fallback ---
             if not srt_files and (self.transcript_var.get() or self.srt_var.get()):
                 media_files = [f for f in os.listdir(folder_path) if f.lower().endswith(('.mp4', '.mkv', '.webm', '.mp3', '.mov', '.avi'))]
                 if media_files:
@@ -1149,23 +1206,67 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
 
                 return
 
+            # --- Process Downloaded YouTube Subtitles (.srt) ---
             for file in srt_files:
                 srt_path = os.path.join(folder_path, file)
                 txt_path = os.path.splitext(srt_path)[0] + ".txt"
+
+                with open(srt_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+
+                # Split SRT into individual subtitle blocks
+                blocks = re.split(r'\n\s*\n', content.strip())
+                filtered_blocks = []
+                clean_dialogue = []
+
+                for block in blocks:
+                    lines = [l.strip() for l in block.splitlines() if l.strip()]
+                    if not lines:
+                        continue
+
+                    time_line_idx = -1
+                    for idx, line in enumerate(lines):
+                        if '-->' in line:
+                            time_line_idx = idx
+                            break
+
+                    if time_line_idx != -1:
+                        time_parts = lines[time_line_idx].split('-->')
+                        start_sub_sec = self.parse_srt_time(time_parts[0])
+                        end_sub_sec = self.parse_srt_time(time_parts[1])
+
+                        # Skip blocks outside of our active clip range
+                        if use_clip:
+                            if end_sub_sec < clip_start_sec or start_sub_sec > clip_end_sec:
+                                continue
+
+                        filtered_blocks.append(lines)
+
+                        # Extract clean dialogue lines for .txt file
+                        text_lines = lines[time_line_idx + 1:]
+                        for line in text_lines:
+                            line = re.sub(r'<[^>]+>', '', line)
+                            if line.isupper():
+                                line = line.capitalize()
+                            if clean_dialogue and clean_dialogue[-1] == line:
+                                continue
+                            if ">>" in line and clean_dialogue and clean_dialogue[-1] != "":
+                                clean_dialogue.append("")
+                            clean_dialogue.append(line)
+
+                # Write out filtered SRT
+                if self.srt_var.get():
+                    with open(srt_path, 'w', encoding='utf-8') as f:
+                        for idx, lines in enumerate(filtered_blocks, start=1):
+                            f.write(f"{idx}\n")
+                            f.write("\n".join(lines[lines.index(next(l for l in lines if '-->' in l)):]) + "\n\n")
+                else:
+                    os.remove(srt_path)
+
+                # Write out filtered TXT transcript
                 if self.transcript_var.get():
-                    with open(srt_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        lines = f.readlines()
-                    clean_dialogue = []
-                    for line in lines:
-                        line = line.strip()
-                        if not line or line.isdigit() or "-->" in line: continue
-                        line = re.sub(r'<[^>]+>', '', line)
-                        if line.isupper(): line = line.capitalize()
-                        if clean_dialogue and clean_dialogue[-1] == line: continue
-                        if ">>" in line and clean_dialogue and clean_dialogue[-1] != "": clean_dialogue.append("")
-                        clean_dialogue.append(line)
-                    with open(txt_path, 'w', encoding='utf-8') as f: f.write("\n".join(clean_dialogue))
-                if not self.srt_var.get(): os.remove(srt_path)
+                    with open(txt_path, 'w', encoding='utf-8') as f:
+                        f.write("\n".join(clean_dialogue))
 
         except Exception as e:
             self.after(0, lambda err=str(e): self.status_label.configure(text=f"Transcript error: {err}", text_color="red"))
@@ -1223,6 +1324,7 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
 
             for line in process.stdout:
                 console_output_logs.append(line.strip())
+                print(line.strip())
                 if "[download] Destination:" in line:
                     video_title = os.path.basename(os.path.dirname(line.split("[download] Destination:")[-1].strip()))
                 elif "has already been downloaded" in line:
@@ -1273,20 +1375,6 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
             self.after(0, lambda e=e: messagebox.showerror("System Error", f"An exception occurred:\n{str(e)}"))
         finally:
             self.after(0, lambda: self.download_btn.configure(state="normal"))
-
-    def update_ytdlp(self):
-        self.update_btn.configure(state="disabled", text="Updating...")
-        self.status_label.configure(text="Checking for engine updates...")
-        def update_worker():
-            try:
-                process = subprocess.run([YTDLP_BIN, "-U"], capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
-                if process.returncode == 0: self.after(0, lambda: messagebox.showinfo("Success", "Engine updated successfully!"))
-                else: self.after(0, lambda: messagebox.showerror("Update Failed", f"Error details:\n{process.stderr}"))
-            except Exception as e: self.after(0, lambda e=e: messagebox.showerror("Update Error", f"An execution error occurred:\n{str(e)}"))
-            finally:
-                self.after(0, lambda: self.status_label.configure(text="Ready", text_color="gray"))
-                self.after(0, lambda: self.update_btn.configure(state="normal", text="Update Engine"))
-        threading.Thread(target=update_worker, daemon=True).start()
 
 if __name__ == "__main__":
     app = SEAMediaArchiverUnifiedApp()
