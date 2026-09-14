@@ -27,8 +27,8 @@ from youtube_transcript_api import YouTubeTranscriptApi
 import whisper
 
 # --- Auto-Updater Configuration ---
-APP_VERSION = "v1.0.0"
-GITHUB_REPO = "YOUR_USERNAME/YOUR_REPOSITORY_NAME"
+APP_VERSION = "v2.5.0"
+GITHUB_REPO = "zparrishSEA/SVP-Pro-MAC"
 # ----------------------------------
 
 # --- Dummy Console Patch for Windowed PyInstaller Apps ---
@@ -194,47 +194,83 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         self.setup_progress.start()
         threading.Thread(target=self.silent_installer_worker, daemon=True).start()
 
+    def route_after_setup(self):
+        """Checks for saved cookies to skip the auth screen on startup."""
+        self.setup_progress.stop()
+        master_cookie_file = os.path.join(APP_DATA_DIR, "master_cookies.txt")
+
+        if os.path.exists(master_cookie_file):
+            # Load existing cookies and profile name
+            self.fb_cookie_path = master_cookie_file
+            self.yt_cookie_path = master_cookie_file
+            self.impersonate_target = "chrome"
+
+            profile_file = os.path.join(APP_DATA_DIR, "active_profile.txt")
+            if os.path.exists(profile_file):
+                with open(profile_file, 'r') as pf: self.active_browser_name = pf.read().strip()
+            else:
+                self.active_browser_name = "Saved Profile"
+
+            self.show_mode_selection()
+        else:
+            # No cookies found, force the user to authenticate
+            self.show_auth_screen()
+
     def silent_installer_worker(self):
-        """Downloads and overwrites yt-dlp, FFmpeg, and FFprobe on every application launch."""
+        """Checks for existing tools, updates yt-dlp, and refreshes FFmpeg every 30 days."""
         try:
-            # 1. Always download the latest yt-dlp binary
-            self.after(0, lambda: self.setup_status.configure(text="Acquiring latest yt-dlp core architecture..."))
-            urllib.request.urlretrieve(YTDLP_URL, YTDLP_BIN)
+            # --- 1. yt-dlp Setup & Smart Update ---
+            if not (os.path.exists(YTDLP_BIN) and os.path.getsize(YTDLP_BIN) > 0):
+                self.after(0, lambda: self.setup_status.configure(text="Acquiring latest yt-dlp core architecture..."))
+                if os.path.exists(YTDLP_BIN):
+                    os.remove(YTDLP_BIN)
+                urllib.request.urlretrieve(YTDLP_URL, YTDLP_BIN)
+            else:
+                self.after(0, lambda: self.setup_status.configure(text="Checking for yt-dlp updates..."))
+                subprocess.run([YTDLP_BIN, "-U"], capture_output=True, creationflags=CREATE_NO_WINDOW)
 
-            # 2. Always download the latest FFmpeg & FFprobe archive
-            self.after(0, lambda: self.setup_status.configure(text="Acquiring latest media components (FFmpeg & FFprobe)..."))
-            zip_temp_path = os.path.join(APP_DATA_DIR, "ffmpeg_temp.zip")
-            urllib.request.urlretrieve(FFMPEG_URL, zip_temp_path)
+            # --- 2. FFmpeg & FFprobe 30-Day Expiration Check ---
+            ffmpeg_valid = False
+            if os.path.exists(FFMPEG_BIN) and os.path.exists(FFPROBE_BIN):
+                # Calculate the file age in seconds
+                file_age_seconds = time.time() - os.path.getmtime(FFMPEG_BIN)
+                days_old = file_age_seconds / (24 * 3600)
 
-            # 3. Extract and overwrite existing binaries in AppData
-            self.after(0, lambda: self.setup_status.configure(text="Configuring execution modules..."))
-            with zipfile.ZipFile(zip_temp_path, 'r') as zip_ref:
-                for file_info in zip_ref.infolist():
-                    if file_info.filename.endswith("ffmpeg.exe"):
-                        with zip_ref.open(file_info) as src, open(FFMPEG_BIN, "wb") as dst:
-                            dst.write(src.read())
-                    elif file_info.filename.endswith("ffprobe.exe"):
-                        with zip_ref.open(file_info) as src, open(FFPROBE_BIN, "wb") as dst:
-                            dst.write(src.read())
+                # Only mark as valid if it's less than 30 days old and larger than 0 bytes
+                if days_old < 30 and os.path.getsize(FFMPEG_BIN) > 0:
+                    ffmpeg_valid = True
 
-            # Cleanup temporary zip file
-            if os.path.exists(zip_temp_path):
-                os.remove(zip_temp_path)
+            if not ffmpeg_valid:
+                self.after(0, lambda: self.setup_status.configure(text="Acquiring latest media components (FFmpeg)..."))
+                zip_temp_path = os.path.join(APP_DATA_DIR, "ffmpeg_temp.zip")
+                urllib.request.urlretrieve(FFMPEG_URL, zip_temp_path)
 
-            # Transition to authentication screen upon success
-            self.after(0, lambda: [self.setup_progress.stop(), self.show_auth_screen()])
+                self.after(0, lambda: self.setup_status.configure(text="Configuring execution modules..."))
+                with zipfile.ZipFile(zip_temp_path, 'r') as zip_ref:
+                    for file_info in zip_ref.infolist():
+                        if file_info.filename.endswith("ffmpeg.exe"):
+                            with zip_ref.open(file_info) as src, open(FFMPEG_BIN, "wb") as dst:
+                                dst.write(src.read())
+                        elif file_info.filename.endswith("ffprobe.exe"):
+                            with zip_ref.open(file_info) as src, open(FFPROBE_BIN, "wb") as dst:
+                                dst.write(src.read())
+
+                if os.path.exists(zip_temp_path):
+                    os.remove(zip_temp_path)
+            else:
+                self.after(0, lambda: self.setup_status.configure(text="Media components verified."))
+
+            # --- 3. Transition forward ---
+            self.after(0, self.route_after_setup)
 
         except Exception as e:
             # Fallback: If offline or download fails, check if we already have working binaries locally
             if os.path.exists(YTDLP_BIN) and os.path.exists(FFMPEG_BIN) and os.path.exists(FFPROBE_BIN):
-                self.after(0, lambda: [
-                    self.setup_progress.stop(),
-                    self.show_auth_screen()
-                ])
+                self.after(0, self.route_after_setup)
             else:
                 self.after(0, lambda e=e: messagebox.showerror(
                     "Setup Failure",
-                    f"Unable to download required tools on launch and no local files were found:\n{str(e)}"
+                    f"Unable to verify or download required tools:\n{str(e)}"
                 ))
                 self.after(0, lambda: self.setup_status.configure(text="Setup aborted.", text_color="red"))
 
@@ -262,14 +298,14 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
 
         ctk.CTkLabel(self.auth_frame, text="Account Authentication", font=ctk.CTkFont(size=24, weight="bold"), text_color="#38d8c3").grid(row=1, column=0, pady=(top_pad, 10))
 
-        info_text = "To download private media and search effectively, we need to securely connect to your browser session.\nSelect the browser where you are currently logged into Facebook and YouTube:"
+        info_text = "To download private media and search effectively, you need to mimic your browser session.\n\nSelect the browser where you are currently logged into Facebook and YouTube:"
         ctk.CTkLabel(self.auth_frame, text=info_text, text_color="gray", wraplength=400, justify="center").grid(row=2, column=0, pady=(0, 30))
 
         self.auth_browser_var = ctk.StringVar(value="Select Browser...")
         dropdown = ctk.CTkOptionMenu(
             self.auth_frame,
             variable=self.auth_browser_var,
-            values=["Firefox", "Chrome", "Edge", "Brave", "Opera"],
+            values=["Firefox", "Chrome", "Edge", "Brave"],
             width=220, height=40,
             fg_color="#2abfae", button_color="#2eae9e", button_hover_color="#21a394", text_color="#2b2b2b",
             dropdown_hover_color="#38d8c3",  # ADDED: unified dropdown hover color
@@ -279,6 +315,12 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
 
     def run_automated_extraction(self, browser_selection):
         if browser_selection == "Select Browser...": return
+
+        # Intercept Chrome and Edge for manual override
+        if browser_selection in ["Chrome", "Edge", "Brave"]:
+            self.show_manual_cookie_dialog(browser_selection)
+            self.auth_browser_var.set("Select Browser...")
+            return
 
         # 1. Define our single master cookie file (No Mac permission check needed here!)
         master_cookie_file = os.path.join(APP_DATA_DIR, "master_cookies.txt")
@@ -339,6 +381,10 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
             else:
                 self.impersonate_target = "chrome" # Chrome, Brave, Opera, and Firefox all safely use Chrome impersonation
 
+            # Save the active profile name
+            self.active_browser_name = browser_selection
+            with open(os.path.join(APP_DATA_DIR, "active_profile.txt"), 'w') as pf: pf.write(browser_selection)
+
             self.show_mode_selection()
 
         except Exception as e:
@@ -356,6 +402,242 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                 messagebox.showerror("Extraction Error", f"Failed to extract cookies from {browser_selection}.\nError: {e}")
 
             self.auth_browser_var.set("Select Browser...")
+
+    def open_extension_link(self, browser_name):
+        """Forces the extension link to open in the specific browser requested."""
+        url = "https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc"
+        try:
+            if browser_name == "Chrome":
+                subprocess.Popen(["start", "/MAX", "chrome", url], shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            elif browser_name == "Edge":
+                subprocess.Popen(["start", "/MAX", "msedge", url], shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            elif browser_name == "Brave":
+                subprocess.Popen(["start", "/MAX", "brave", url], shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            else:
+                webbrowser.open(url)
+        except Exception:
+            # Fallback to the system default if the direct launch fails
+            webbrowser.open(url)
+
+    def show_manual_cookie_dialog(self, browser_name):
+        """Displays a custom popup with stacked actions and a bottom-right tutorial button."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(f"{browser_name} Session Mimic")
+
+        # 1. Set window dimensions
+        win_w, win_h = 540, 420
+        dialog.geometry(f"{win_w}x{win_h}")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        try:
+            dialog.after(200, lambda: dialog.iconphoto(False, self.tk_icon))
+        except Exception:
+            pass
+
+        # 2. Center the dialog relative to the main application window
+        x = self.winfo_x() + (self.winfo_width() // 2) - (win_w // 2)
+        y = self.winfo_y() + (self.winfo_height() // 2) - (win_h // 2)
+        dialog.geometry(f"+{x}+{y}")
+
+        # --- TEXT SECTION ---
+
+        # Header Title
+        title_lbl = ctk.CTkLabel(
+            dialog,
+            text=f"{browser_name} Requires Manual Input",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color="#38d8c3"
+        )
+        title_lbl.pack(pady=(15, 10))
+
+        # Centered Bold Info Text
+        info_text = (
+            f"For security purposes, {browser_name} locks its session data.\n\n"
+            "You must manually download and import your\n"
+            "browser cookies in order to mimic your session."
+        )
+        info_lbl = ctk.CTkLabel(
+            dialog,
+            text=info_text,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            justify="center"
+        )
+        info_lbl.pack(padx=20, pady=(0, 15))
+
+        # Full Directions (Steps 1 to 4)
+        directions_text = (
+            "1. Click 'Get Extension' to install a commonly used cookie extractor directly in your browser.\n\n"
+            f"2. Open the newly installed extension in {browser_name} and click 'Export All Cookies'.\n\n"
+            "3. Save the 'cookies.txt' file to your local 'Downloads' folder.\n\n"
+            "4. Click the 'Upload File' button below and select 'cookies.txt' to import and mimic session data."
+        )
+        ctk.CTkLabel(dialog, text=directions_text, wraplength=480, justify="left").pack(padx=20, pady=(0, 15))
+
+        # --- PRIMARY BUTTON SECTION ---
+
+        # 1. Get Extension Button
+        ext_btn = ctk.CTkButton(
+            dialog,
+            text="1. Get Extension",
+            command=lambda: self.open_extension_link(browser_name),
+            fg_color="#444444", hover_color="#555555"
+        )
+        ext_btn.pack(pady=6)
+
+        # 2. Upload File Button
+        up_btn = ctk.CTkButton(
+            dialog,
+            text="2. Upload File",
+            command=lambda: self.upload_manual_cookies(dialog, browser_name),
+            fg_color="#444444", hover_color="#555555"
+        )
+        up_btn.pack(pady=6)
+
+        # --- CORNER BUTTON SECTION ---
+
+        # 3. Watch Tutorial Button (Standard size, anchored to the bottom-right corner)
+        howto_btn = ctk.CTkButton(
+            dialog,
+            text="Watch Tutorial",
+            command=self.show_tutorial_video,
+            fg_color="#6c4fa1",
+            hover_color="#58266d",
+            text_color="#ffffff",
+            font=ctk.CTkFont(weight="bold")
+        )
+        # Position anchored to the South-East corner with 20px padding from edges
+        howto_btn.place(relx=1.0, rely=1.0, anchor="se", x=-20, y=-20)
+
+    def show_tutorial_video(self):
+        """Displays a window scaled to ~80% of the screen containing a GIF playing at native FPS."""
+        tut_window = ctk.CTkToplevel(self)
+        tut_window.title("How To: Export Cookies")
+        tut_window.transient(self)
+        tut_window.grab_set()
+
+        # 1. Calculate 80% of screen dimensions and center the window
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+
+        win_w = int(screen_w * 0.8)
+        win_h = int(screen_h * 0.8)
+
+        start_x = int((screen_w - win_w) / 2)
+        start_y = int((screen_h - win_h) / 2)
+
+        tut_window.geometry(f"{win_w}x{win_h}+{start_x}+{start_y}")
+
+        # 2. Apply your custom window icon
+        try:
+            tut_window.after(200, lambda: tut_window.iconphoto(False, self.tk_icon))
+        except Exception:
+            pass
+
+        # --- REORDERED PACKING LOGIC ---
+
+        # 3. Create and pack the "Got It!" button at the BOTTOM FIRST
+        got_it_btn = ctk.CTkButton(
+            tut_window,
+            text="Got It!",
+            command=tut_window.destroy,
+            width=140,
+            height=36,
+            fg_color="#6c4fa1",
+            hover_color="#58266d",
+            text_color="#ffffff",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        # Lock to the bottom edge so it is always visible immediately
+        got_it_btn.pack(side="bottom", pady=15)
+
+        # 4. Create and pack the GIF label to fill the REMAINING space above
+        gif_label = ctk.CTkLabel(tut_window, text="Loading animation...")
+        gif_label.pack(side="top", expand=True, fill="both", padx=20, pady=(15, 0))
+
+        # -------------------------------
+
+        # 5. Locate the GIF file and begin playback
+        gif_path = resource_path("tutorial.gif")
+        if not os.path.exists(gif_path):
+            gif_label.configure(text="Tutorial animation not found.\nPlease ensure 'tutorial.gif' is packed into the app.")
+            return
+
+        try:
+            gif_image = Image.open(gif_path)
+
+            frames = []
+            durations = []
+
+            try:
+                while True:
+                    frame = gif_image.copy().convert("RGBA")
+
+                    w, h = frame.size
+                    target_w = win_w - 60
+                    target_h = int((h / w) * target_w)
+
+                    ctk_frame = ctk.CTkImage(light_image=frame, dark_image=frame, size=(target_w, target_h))
+                    frames.append(ctk_frame)
+
+                    frame_delay = gif_image.info.get('duration', 100)
+                    durations.append(frame_delay)
+
+                    gif_image.seek(len(frames))
+            except EOFError:
+                pass
+
+            if frames:
+                def animate(frame_idx):
+                    if not tut_window.winfo_exists():
+                        return
+
+                    gif_label.configure(image=frames[frame_idx], text="")
+                    next_idx = (frame_idx + 1) % len(frames)
+
+                    delay = durations[frame_idx]
+                    tut_window.after(delay, animate, next_idx)
+
+                animate(0)
+        except Exception as e:
+            gif_label.configure(text=f"Error loading animation:\n{e}")
+
+    def upload_manual_cookies(self, dialog_window, browser_name):
+        """Ingests the manual cookies.txt file and closes the popup dialog."""
+        file_path = filedialog.askopenfilename(
+            title="Select cookies.txt",
+            filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")]
+        )
+
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'r', encoding='utf-8') as src:
+                cookie_data = src.read()
+
+            if "# Netscape HTTP Cookie File" not in cookie_data:
+                messagebox.showerror("Invalid File", "The selected file does not appear to be a valid Netscape cookies.txt file.")
+                return
+
+            master_cookie_file = os.path.join(APP_DATA_DIR, "master_cookies.txt")
+            with open(master_cookie_file, 'w', encoding='utf-8') as dst:
+                dst.write(cookie_data)
+
+            self.fb_cookie_path = master_cookie_file
+            self.yt_cookie_path = master_cookie_file
+            self.impersonate_target = "chrome"
+
+            # Save the active profile name using the passed variable
+            self.active_browser_name = browser_name
+            with open(os.path.join(APP_DATA_DIR, "active_profile.txt"), 'w') as pf: pf.write(browser_name)
+
+            # Close the popup and move forward!
+            dialog_window.destroy()
+            self.show_mode_selection()
+
+        except Exception as e:
+            messagebox.showerror("Upload Error", f"Failed to process the cookie file.\n\nError: {e}")
 
     # ==========================================
     # 2. HUB / MODE SELECTION MENU
@@ -430,19 +712,43 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
             target_w_pauly = int((pauly_raw.width / pauly_raw.height) * target_h_pauly)
             pauly_img = ctk.CTkImage(light_image=pauly_raw, dark_image=pauly_raw, size=(target_w_pauly, target_h_pauly))
 
-            # CHANGE 1: Set the master to self.mode_frame to prevent clipping
             # Explicitly set fg_color to transparent so it blends with the background
             pauly_label = ctk.CTkLabel(self.mode_frame, image=pauly_img, text="", fg_color="transparent")
-
-            # CHANGE 2: Use rely=0.0 and anchor="s" to rest the bounding box exactly on top of the button
-            # relx=0.85 shifts him nicely to the right side of the button
             pauly_label.place(in_=save_btn, relx=0.85, rely=0.0, anchor="s")
         except Exception:
             pass
 
+        # 6. Add Active Profile Label to top right corner
+        self.profile_display_label = ctk.CTkLabel(
+            self.mode_frame,
+            text="Active Profile: Unknown",
+            text_color="gray",
+            font=ctk.CTkFont(size=12, slant="italic")
+        )
+        # Pin to the top right
+        self.profile_display_label.place(relx=0.96, rely=0.03, anchor="ne")
+
+        # 7. Add a compact Switch Browser button right below the profile label
+        switch_btn = ctk.CTkButton(
+            self.mode_frame,
+            text="Switch / Reset",
+            command=self.switch_browser,
+            width=120,
+            height=24,
+            font=ctk.CTkFont(size=11),
+            fg_color="#444444",
+            hover_color="#555555"
+        )
+        # Pin directly under the label by slightly increasing the 'rely' coordinate
+        switch_btn.place(relx=0.96, rely=0.07, anchor="ne")
+
     def show_mode_selection(self):
         self.hide_all_frames()
         self.mode_frame.grid(row=0, column=0, sticky="nsew")
+
+        # Dynamically update the label with the active browser name
+        if hasattr(self, 'active_browser_name'):
+            self.profile_display_label.configure(text=f"Active Profile: {self.active_browser_name}")
 
     def open_search_mode(self):
         self.hide_all_frames()
@@ -1421,10 +1727,8 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                 error_lower = error_details.lower()
                 if "sign in" in error_lower or "cookie" in error_lower or "403" in error_lower:
                     self.after(0, lambda: self.status_label.configure(text="Session Expired.", text_color="red"))
-                    self.after(0, lambda: messagebox.showwarning(
-                        "Authentication Failed",
-                        "Your browser session was rejected or has expired.\n\nPlease open your browser, log out of the website, log back in, and restart this application to refresh your cookies."
-                    ))
+                    # Trigger the automated reset and reroute!
+                    self.after(0, self.handle_expired_cookies)
                 else:
                     self.after(0, lambda: self.status_label.configure(text="Download failed.", text_color="red"))
                     self.after(0, lambda err=error_details: messagebox.showerror("Extraction Error", f"The extraction process failed.\n\nDetails:\n{err}"))
@@ -1433,6 +1737,50 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
             self.after(0, lambda e=e: messagebox.showerror("System Error", f"An exception occurred:\n{str(e)}"))
         finally:
             self.after(0, lambda: self.download_btn.configure(state="normal"))
+
+    def handle_expired_cookies(self):
+        """Wipes expired cookies from memory and routes the user back to the Auth screen."""
+        messagebox.showwarning(
+            "Authentication Expired",
+            "Your saved browser session has expired or was rejected by the server.\n\n"
+            "The Archiver will now return you to the Authentication screen so you can upload a fresh cookies.txt file."
+        )
+
+        # Delete the dead cookie file
+        master_cookie_file = os.path.join(APP_DATA_DIR, "master_cookies.txt")
+        if os.path.exists(master_cookie_file):
+            os.remove(master_cookie_file)
+
+        # NEW: Delete the active profile name tracker
+        profile_file = os.path.join(APP_DATA_DIR, "active_profile.txt")
+        if os.path.exists(profile_file):
+            os.remove(profile_file)
+
+        # Clear the active variables
+        self.fb_cookie_path = None
+        self.yt_cookie_path = None
+
+        # Kick them back to the login screen
+        self.show_auth_screen()
+
+    def switch_browser(self):
+        """Allows the user to manually wipe saved cookies and pick a new browser."""
+        # Delete the active cookie file
+        master_cookie_file = os.path.join(APP_DATA_DIR, "master_cookies.txt")
+        if os.path.exists(master_cookie_file):
+            os.remove(master_cookie_file)
+
+        # NEW: Delete the active profile name tracker
+        profile_file = os.path.join(APP_DATA_DIR, "active_profile.txt")
+        if os.path.exists(profile_file):
+            os.remove(profile_file)
+
+        # Clear the active variables
+        self.fb_cookie_path = None
+        self.yt_cookie_path = None
+
+        # Route back to the login screen
+        self.show_auth_screen()
 
 if __name__ == "__main__":
     app = SEAMediaArchiverUnifiedApp()

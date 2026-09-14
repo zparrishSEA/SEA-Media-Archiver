@@ -1,7 +1,7 @@
 [Setup]
 ; Application metadata
 AppName=SEA Media Archiver
-AppVersion=1.0.0
+AppVersion=2.5.0
 AppPublisher=SEA
 ; Default installation folder (Program Files)
 DefaultDirName={autopf}\SEA Media Archiver

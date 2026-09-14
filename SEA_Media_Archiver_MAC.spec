@@ -3,7 +3,7 @@
 block_cipher = None
 
 a = Analysis(
-    ['SMA_Pro_MAC.py'],
+    ['SMA_Pro_MAC_v3.py'],
     pathex=[],
     binaries=[],
     datas=[
@@ -12,6 +12,7 @@ a = Analysis(
         ('scope.png', '.'),
         ('chest.png', '.'),
         ('my_icon.png', '.'),
+		('tutorial.gif', '.'),
         ('my_icon.ico', '.')
     ],
     hiddenimports=[

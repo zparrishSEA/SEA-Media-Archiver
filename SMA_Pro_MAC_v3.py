@@ -12,7 +12,7 @@ import urllib.parse
 import http.cookiejar
 import zipfile
 import subprocess
-import ctypes
+import stat
 import webbrowser
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
@@ -20,16 +20,24 @@ import customtkinter as ctk
 from PIL import Image, ImageTk
 import requests
 import browser_cookie3
-import win32crypt
-from Cryptodome.Cipher import AES
 import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi
 import whisper
+import ssl
 
 # --- Auto-Updater Configuration ---
-APP_VERSION = "v1.0.0"
-GITHUB_REPO = "YOUR_USERNAME/YOUR_REPOSITORY_NAME"
+APP_VERSION = "v2.5.0"
+GITHUB_REPO = "zparrishSEA/SVP-Pro-MAC"
 # ----------------------------------
+
+# --- MAC SSL PATCH ---
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+else:
+    ssl._create_default_https_context = _create_unverified_https_context
+# ---------------------
 
 # --- Dummy Console Patch for Windowed PyInstaller Apps ---
 class DummySysStream:
@@ -41,37 +49,36 @@ if sys.stderr is None: sys.stderr = DummySysStream()
 # --------------------------------------------------------------
 
 def resource_path(relative_path):
-    """ Get absolute path to resource, works for dev and for PyInstaller compilation """
     try: base_path = sys._MEIPASS
     except Exception: base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
-try:
-    myappid = 'sea.mediaarchiver.v1.0'
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-except Exception: pass
+def open_mac_full_disk_access():
+    msg = "Please grant Full Disk Access to SEA Media Archiver so it can save your media.\n\nWe will now open System Settings for you. Please toggle the switch next to the app, then restart it."
+    messagebox.showwarning("Permission Required", msg)
+    subprocess.run(["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"])
 
 # -----------------------------
-# Configuration & Storage Paths
+# Configuration & Storage Paths (macOS)
 # -----------------------------
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-CREATE_NO_WINDOW = 0x08000000
-
-APP_DATA_DIR = os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'SEAMediaArchiver')
+APP_DATA_DIR = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support', 'SEAMediaArchiverPro')
 os.makedirs(APP_DATA_DIR, exist_ok=True)
 
-# Expose APP_DATA_DIR to System PATH so Whisper can locate ffmpeg natively
 if APP_DATA_DIR not in os.environ.get("PATH", ""):
     os.environ["PATH"] = APP_DATA_DIR + os.pathsep + os.environ.get("PATH", "")
 
-YTDLP_BIN = os.path.join(APP_DATA_DIR, "yt-dlp.exe")
-FFMPEG_BIN = os.path.join(APP_DATA_DIR, "ffmpeg.exe")
-FFPROBE_BIN = os.path.join(APP_DATA_DIR, "ffprobe.exe")
+# Removed .exe extensions
+YTDLP_BIN = os.path.join(APP_DATA_DIR, "yt-dlp")
+FFMPEG_BIN = os.path.join(APP_DATA_DIR, "ffmpeg")
+FFPROBE_BIN = os.path.join(APP_DATA_DIR, "ffprobe")
 
-YTDLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
-FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+# macOS specific URLs
+YTDLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
+FFMPEG_URL = "https://evermeet.cx/ffmpeg/getrelease/zip"
+FFPROBE_URL = "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip"
 
 class SEAMediaArchiverUnifiedApp(ctk.CTk):
     def __init__(self):
@@ -87,10 +94,9 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
 
         self.fb_cookie_path = None
         self.yt_cookie_path = None
-        self.impersonate_target = "chrome"  # Default impersonation target
+        self.impersonate_target = "Safari"
         self.found_videos_list = []
 
-        # Master Display Frames
         self.setup_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.auth_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.mode_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -103,15 +109,12 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         self.download_frame.grid_rowconfigure(8, weight=1)
         self.search_frame.grid_rowconfigure(3, weight=1)
 
-        # Build Interfaces
         self.build_setup_interface()
         self.build_mode_interface()
         self.build_download_interface()
         self.build_search_interface()
 
-        # Bind Enter key to download action in Video Downloader view
         self.bind("<Return>", self.start_download)
-
         self.check_and_route_user()
 
         self.transcript_cache = {}
@@ -145,7 +148,6 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
             webbrowser.open(release_url)
 
     def create_context_menu(self, ctk_entry):
-        """Creates a native right-click copy/paste menu for CustomTkinter entry fields."""
         menu = tk.Menu(self, tearoff=0, bg="#2b2b2b", fg="white", activebackground="#38d8c3", activeforeground="black")
         menu.add_command(label="Cut", command=lambda: ctk_entry._entry.event_generate("<<Cut>>"))
         menu.add_command(label="Copy", command=lambda: ctk_entry._entry.event_generate("<<Copy>>"))
@@ -154,13 +156,14 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         def show_menu(event):
             menu.tk_popup(event.x_root, event.y_root)
 
+        ctk_entry.bind("<Button-2>", show_menu)
         ctk_entry.bind("<Button-3>", show_menu)
+        ctk_entry._entry.bind("<Button-2>", show_menu)
         ctk_entry._entry.bind("<Button-3>", show_menu)
 
     def apply_window_icon(self):
         try:
-            icon_file_path = resource_path("my_icon.ico")
-            self.iconbitmap(icon_file_path)
+            icon_file_path = resource_path("my_icon.png")
             pil_icon = Image.open(icon_file_path)
             self.tk_icon = ImageTk.PhotoImage(pil_icon)
             self.iconphoto(True, self.tk_icon)
@@ -179,13 +182,17 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
     def build_setup_interface(self):
         self.setup_title = ctk.CTkLabel(self.setup_frame, text="Initializing System Tooling", font=ctk.CTkFont(size=24, weight="bold"))
         self.setup_title.grid(row=0, column=0, pady=(180, 10))
-        self.setup_subtitle = ctk.CTkLabel(self.setup_frame, text="Downloading required media modules. Please wait...", text_color="gray")
+        self.setup_subtitle = ctk.CTkLabel(self.setup_frame, text="Downloading required media modules silently. Please wait...", text_color="gray")
         self.setup_subtitle.grid(row=1, column=0, pady=(0, 30))
         self.setup_progress = ctk.CTkProgressBar(self.setup_frame, width=450)
         self.setup_progress.grid(row=2, column=0, pady=10)
         self.setup_progress.configure(mode="indeterminate")
         self.setup_status = ctk.CTkLabel(self.setup_frame, text="Connecting to servers...", text_color="yellow")
         self.setup_status.grid(row=3, column=0, pady=5)
+
+    def make_executable(self, path):
+        st = os.stat(path)
+        os.chmod(path, st.st_mode | stat.S_IEXEC)
 
     def check_and_route_user(self):
         """Always routes through the setup screen on startup to fetch fresh binary tools."""
@@ -194,43 +201,69 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         self.setup_progress.start()
         threading.Thread(target=self.silent_installer_worker, daemon=True).start()
 
+    def route_after_setup(self):
+        """Checks for saved cookies to skip the auth screen on startup."""
+        self.setup_progress.stop()
+        master_cookie_file = os.path.join(APP_DATA_DIR, "master_cookies.txt")
+
+        if os.path.exists(master_cookie_file):
+            self.fb_cookie_path = master_cookie_file
+            self.yt_cookie_path = master_cookie_file
+            self.impersonate_target = "safari"
+
+            profile_file = os.path.join(APP_DATA_DIR, "active_profile.txt")
+            if os.path.exists(profile_file):
+                with open(profile_file, 'r') as pf: self.active_browser_name = pf.read().strip()
+            else:
+                self.active_browser_name = "Saved Profile"
+
+            self.show_mode_selection()
+        else:
+            self.show_auth_screen()
+
     def silent_installer_worker(self):
-        """Downloads and overwrites yt-dlp, FFmpeg, and FFprobe on every application launch."""
+        """Downloads and overwrites Mac-specific yt-dlp, FFmpeg, and FFprobe on every launch."""
         try:
-            # 1. Always download the latest yt-dlp binary
             self.after(0, lambda: self.setup_status.configure(text="Acquiring latest yt-dlp core architecture..."))
+            if os.path.exists(YTDLP_BIN):
+                os.remove(YTDLP_BIN)
             urllib.request.urlretrieve(YTDLP_URL, YTDLP_BIN)
+            self.make_executable(YTDLP_BIN)
 
-            # 2. Always download the latest FFmpeg & FFprobe archive
             self.after(0, lambda: self.setup_status.configure(text="Acquiring latest media components (FFmpeg & FFprobe)..."))
-            zip_temp_path = os.path.join(APP_DATA_DIR, "ffmpeg_temp.zip")
-            urllib.request.urlretrieve(FFMPEG_URL, zip_temp_path)
+            zip_ffm = os.path.join(APP_DATA_DIR, "ffm_temp.zip")
+            zip_ffp = os.path.join(APP_DATA_DIR, "ffp_temp.zip")
+            urllib.request.urlretrieve(FFMPEG_URL, zip_ffm)
+            urllib.request.urlretrieve(FFPROBE_URL, zip_ffp)
 
-            # 3. Extract and overwrite existing binaries in AppData
             self.after(0, lambda: self.setup_status.configure(text="Configuring execution modules..."))
-            with zipfile.ZipFile(zip_temp_path, 'r') as zip_ref:
-                for file_info in zip_ref.infolist():
-                    if file_info.filename.endswith("ffmpeg.exe"):
-                        with zip_ref.open(file_info) as src, open(FFMPEG_BIN, "wb") as dst:
-                            dst.write(src.read())
-                    elif file_info.filename.endswith("ffprobe.exe"):
-                        with zip_ref.open(file_info) as src, open(FFPROBE_BIN, "wb") as dst:
-                            dst.write(src.read())
+            if os.path.exists(FFMPEG_BIN):
+                os.remove(FFMPEG_BIN)
+            with zipfile.ZipFile(zip_ffm, 'r') as zf:
+                with zf.open("ffmpeg") as src, open(FFMPEG_BIN, "wb") as dst:
+                    dst.write(src.read())
 
-            # Cleanup temporary zip file
-            if os.path.exists(zip_temp_path):
-                os.remove(zip_temp_path)
+            if os.path.exists(FFPROBE_BIN):
+                os.remove(FFPROBE_BIN)
+            with zipfile.ZipFile(zip_ffp, 'r') as zf:
+                with zf.open("ffprobe") as src, open(FFPROBE_BIN, "wb") as dst:
+                    dst.write(src.read())
 
-            # Transition to authentication screen upon success
-            self.after(0, lambda: [self.setup_progress.stop(), self.show_auth_screen()])
+            self.make_executable(FFMPEG_BIN)
+            self.make_executable(FFPROBE_BIN)
+
+            if os.path.exists(zip_ffm): os.remove(zip_ffm)
+            if os.path.exists(zip_ffp): os.remove(zip_ffp)
+
+            self.after(0, self.route_after_setup)
 
         except Exception as e:
-            # Fallback: If offline or download fails, check if we already have working binaries locally
-            if os.path.exists(YTDLP_BIN) and os.path.exists(FFMPEG_BIN) and os.path.exists(FFPROBE_BIN):
-                self.after(0, lambda: [
-                    self.setup_progress.stop(),
-                    self.show_auth_screen()
-                ])
+            ytdlp_valid = os.path.exists(YTDLP_BIN) and os.path.getsize(YTDLP_BIN) > 0
+            ffmpeg_valid = os.path.exists(FFMPEG_BIN) and os.path.getsize(FFMPEG_BIN) > 0
+            ffprobe_valid = os.path.exists(FFPROBE_BIN) and os.path.getsize(FFPROBE_BIN) > 0
+
+            if ytdlp_valid and ffmpeg_valid and ffprobe_valid:
+                self.after(0, self.route_after_setup)
             else:
                 self.after(0, lambda e=e: messagebox.showerror(
                     "Setup Failure",
@@ -238,41 +271,63 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                 ))
                 self.after(0, lambda: self.setup_status.configure(text="Setup aborted.", text_color="red"))
 
+    def check_mac_permissions(self, browser_selection):
+        if sys.platform != "darwin":
+            return True
+
+        paths_map = {
+            "Safari": ["~/Library/Containers/com.apple.Safari/Data/Library/Cookies", "~/Library/Cookies"],
+            "Chrome": ["~/Library/Application Support/Google/Chrome"],
+            "Firefox": ["~/Library/Application Support/Firefox"],
+            "Edge": ["~/Library/Application Support/Microsoft Edge"],
+            "Brave": ["~/Library/Application Support/BraveSoftware/Brave-Browser"]
+        }
+
+        candidate_paths = paths_map.get(browser_selection, [])
+        if not candidate_paths:
+            return True
+
+        for relative_path in candidate_paths:
+            target_dir = os.path.expanduser(relative_path)
+            if not os.path.exists(target_dir):
+                continue
+            try:
+                os.listdir(target_dir)
+                return True
+            except PermissionError:
+                open_mac_full_disk_access()
+                return False
+            except Exception:
+                pass
+        return True
+
     def show_auth_screen(self):
         self.hide_all_frames()
         self.auth_frame.grid(row=0, column=0, sticky="nsew")
 
-        # 1. Setup logo Image at Top Center
         try:
             logo_raw = Image.open(resource_path("logo.png"))
             orig_w, orig_h = logo_raw.size
             target_w = 260
             target_h = int((orig_h / orig_w) * target_w)
             logo_img = ctk.CTkImage(light_image=logo_raw, dark_image=logo_raw, size=(target_w, target_h))
-
             self.logo_label = ctk.CTkLabel(self.auth_frame, image=logo_img, text="")
             self.logo_label.grid(row=0, column=0, pady=(60, 10))
-        except Exception:
-            # Failsafe if logo.png is missing or misnamed
-            pass
+        except Exception: pass
 
-        # 2. Main Title and Inputs
-        # We adjust the top padding based on whether the logo image loaded successfully
         top_pad = 10 if hasattr(self, 'logo_label') else 150
-
         ctk.CTkLabel(self.auth_frame, text="Account Authentication", font=ctk.CTkFont(size=24, weight="bold"), text_color="#38d8c3").grid(row=1, column=0, pady=(top_pad, 10))
-
-        info_text = "To download private media and search effectively, we need to securely connect to your browser session.\nSelect the browser where you are currently logged into Facebook and YouTube:"
+        info_text = "To download private media and search effectively, you need to mimic your browser session.\n\nSelect the browser where you are currently logged into Facebook and YouTube:"
         ctk.CTkLabel(self.auth_frame, text=info_text, text_color="gray", wraplength=400, justify="center").grid(row=2, column=0, pady=(0, 30))
 
         self.auth_browser_var = ctk.StringVar(value="Select Browser...")
         dropdown = ctk.CTkOptionMenu(
             self.auth_frame,
             variable=self.auth_browser_var,
-            values=["Firefox", "Chrome", "Edge", "Brave", "Opera"],
+            values=["Safari", "Firefox", "Chrome", "Edge", "Brave"],
             width=220, height=40,
             fg_color="#2abfae", button_color="#2eae9e", button_hover_color="#21a394", text_color="#2b2b2b",
-            dropdown_hover_color="#38d8c3",  # ADDED: unified dropdown hover color
+            dropdown_hover_color="#38d8c3",
             command=self.run_automated_extraction
         )
         dropdown.grid(row=3, column=0, pady=10)
@@ -280,16 +335,20 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
     def run_automated_extraction(self, browser_selection):
         if browser_selection == "Select Browser...": return
 
-        # 1. Define our single master cookie file (No Mac permission check needed here!)
+        if browser_selection in ["Chrome", "Edge", "Brave"]:
+            self.show_manual_cookie_dialog(browser_selection)
+            self.auth_browser_var.set("Select Browser...")
+            return
+
+        if not self.check_mac_permissions(browser_selection):
+            self.auth_browser_var.set("Select Browser...")
+            return
+
         master_cookie_file = os.path.join(APP_DATA_DIR, "master_cookies.txt")
 
-        # 2. Attempt to extract the cookies
         try:
             if browser_selection == "Firefox": cj = browser_cookie3.firefox()
-            elif browser_selection == "Chrome": cj = browser_cookie3.chrome()
-            elif browser_selection == "Edge": cj = browser_cookie3.edge()
-            elif browser_selection == "Brave": cj = browser_cookie3.brave()
-            elif browser_selection == "Opera": cj = browser_cookie3.opera()
+            elif browser_selection == "Safari": cj = browser_cookie3.safari()
             else: cj = None
 
             if not cj:
@@ -297,27 +356,19 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                 self.auth_browser_var.set("Select Browser...")
                 return
 
-            # Track if we successfully find our required session cookies
             fb_found = False
             yt_found = False
-
-            master_cookie_file = os.path.join(APP_DATA_DIR, "master_cookies.txt")
 
             with open(master_cookie_file, 'w', encoding='utf-8') as f:
                 f.write("# Netscape HTTP Cookie File\n")
                 for cookie in cj:
                     if "facebook.com" in cookie.domain: fb_found = True
                     if "youtube.com" in cookie.domain: yt_found = True
-
-                    # Extract variables safely
                     expires = str(int(cookie.expires)) if cookie.expires else '0'
                     domain_specified = 'TRUE' if cookie.domain.startswith('.') else 'FALSE'
                     secure = 'TRUE' if cookie.secure else 'FALSE'
-
-                    # Write ALL cookies across the entire web into the master file
                     f.write(f"{cookie.domain}\t{domain_specified}\t{cookie.path}\t{secure}\t{expires}\t{cookie.name}\t{cookie.value}\n")
 
-            # --- Flag Expired or Missing Sessions ---
             if not fb_found and not yt_found:
                 messagebox.showwarning(
                     "Session Expired",
@@ -325,43 +376,206 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                 )
                 self.auth_browser_var.set("Select Browser...")
                 return
-            # ---------------------------------------------
 
-            # Point both variables to the new master file so you don't have to rewrite the rest of your app!
             self.fb_cookie_path = master_cookie_file
             self.yt_cookie_path = master_cookie_file
 
-            # Map the user's browser choice to the correct yt-dlp impersonate target
             if browser_selection == "Edge":
                 self.impersonate_target = "edge"
             elif browser_selection == "Safari":
                 self.impersonate_target = "safari"
             else:
-                self.impersonate_target = "chrome" # Chrome, Brave, Opera, and Firefox all safely use Chrome impersonation
+                self.impersonate_target = "chrome"
+
+            self.active_browser_name = browser_selection
+            with open(os.path.join(APP_DATA_DIR, "active_profile.txt"), 'w') as pf: pf.write(browser_selection)
 
             self.show_mode_selection()
 
         except Exception as e:
-            error_msg = str(e).lower()
-
-            # Catch specific encryption/locking errors common to Chrome and Edge
-            if "decryption" in error_msg or "key" in error_msg or "locked" in error_msg:
-                messagebox.showerror(
-                    "Browser Locked",
-                    f"Failed to unlock {browser_selection} cookies.\n\n"
-                    f"Chrome and Edge lock their data while running. Please ensure {browser_selection} is COMPLETELY closed (check your system tray), then try again.\n\n"
-                    f"Backend Error: {e}"
-                )
-            else:
-                messagebox.showerror("Extraction Error", f"Failed to extract cookies from {browser_selection}.\nError: {e}")
-
+            messagebox.showerror("Extraction Error", f"Failed to extract cookies from {browser_selection}.\nError: {e}")
             self.auth_browser_var.set("Select Browser...")
+
+    def open_extension_link(self, browser_name):
+        """Forces the extension link to open in the specific browser requested on macOS."""
+        url = "https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc"
+        try:
+            if browser_name == "Chrome":
+                subprocess.Popen(["open", "-a", "Google Chrome", url])
+            elif browser_name == "Edge":
+                subprocess.Popen(["open", "-a", "Microsoft Edge", url])
+            elif browser_name == "Brave":
+                subprocess.Popen(["open", "-a", "Brave Browser", url])
+            else:
+                webbrowser.open(url)
+        except Exception:
+            webbrowser.open(url)
+
+    def show_manual_cookie_dialog(self, browser_name):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(f"{browser_name} Session Mimic")
+
+        win_w, win_h = 540, 520
+        dialog.geometry(f"{win_w}x{win_h}")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        try:
+            dialog.after(200, lambda: dialog.iconphoto(False, self.tk_icon))
+        except Exception:
+            pass
+
+        x = self.winfo_x() + (self.winfo_width() // 2) - (win_w // 2)
+        y = self.winfo_y() + (self.winfo_height() // 2) - (win_h // 2)
+        dialog.geometry(f"+{x}+{y}")
+
+        title_lbl = ctk.CTkLabel(dialog, text=f"{browser_name} Requires Manual Input", font=ctk.CTkFont(size=18, weight="bold"), text_color="#38d8c3")
+        title_lbl.pack(pady=(15, 10))
+
+        info_text = (
+            f"For security purposes, {browser_name} locks its session data.\n\n"
+            "You must manually download and import your\n"
+            "browser cookies in order to mimic your session."
+        )
+        info_lbl = ctk.CTkLabel(dialog, text=info_text, font=ctk.CTkFont(size=13, weight="bold"), justify="center")
+        info_lbl.pack(padx=20, pady=(0, 15))
+
+        directions_text = (
+            "1. Click 'Get Extension' to install a commonly used cookie extractor directly in your browser.\n\n"
+            f"2. Open the newly installed extension in {browser_name} and click 'Export All Cookies'.\n\n"
+            "3. Save the 'cookies.txt' file to your local 'Downloads' folder.\n\n"
+            "4. Click the 'Upload File' button below and select 'cookies.txt' to import and mimic session data."
+        )
+        ctk.CTkLabel(dialog, text=directions_text, wraplength=480, justify="left").pack(padx=20, pady=(0, 15))
+
+        ext_btn = ctk.CTkButton(
+            dialog, text="1. Get Extension",
+            command=lambda: self.open_extension_link(browser_name),
+            fg_color="#444444", hover_color="#555555"
+        )
+        ext_btn.pack(pady=6)
+
+        up_btn = ctk.CTkButton(
+            dialog, text="2. Upload File",
+            command=lambda: self.upload_manual_cookies(dialog, browser_name),
+            fg_color="#444444", hover_color="#555555"
+        )
+        up_btn.pack(pady=6)
+
+        howto_btn = ctk.CTkButton(
+            dialog, text="Watch Tutorial",
+            command=self.show_tutorial_video,
+            fg_color="#6c4fa1", hover_color="#58266d", text_color="#ffffff", font=ctk.CTkFont(weight="bold")
+        )
+        howto_btn.place(relx=1.0, rely=1.0, anchor="se", x=-20, y=-20)
+
+    def show_tutorial_video(self):
+        tut_window = ctk.CTkToplevel(self)
+        tut_window.title("How To: Export Cookies")
+        tut_window.transient(self)
+        tut_window.grab_set()
+
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+
+        win_w = int(screen_w * 0.8)
+        win_h = int(screen_h * 0.8)
+
+        start_x = int((screen_w - win_w) / 2)
+        start_y = int((screen_h - win_h) / 2)
+
+        tut_window.geometry(f"{win_w}x{win_h}+{start_x}+{start_y}")
+
+        try:
+            tut_window.after(200, lambda: tut_window.iconphoto(False, self.tk_icon))
+        except Exception:
+            pass
+
+        got_it_btn = ctk.CTkButton(
+            tut_window, text="Got It!", command=tut_window.destroy,
+            width=140, height=36, fg_color="#6c4fa1", hover_color="#58266d",
+            text_color="#ffffff", font=ctk.CTkFont(size=14, weight="bold")
+        )
+        got_it_btn.pack(side="bottom", pady=15)
+
+        gif_label = ctk.CTkLabel(tut_window, text="Loading animation...")
+        gif_label.pack(side="top", expand=True, fill="both", padx=20, pady=(15, 0))
+
+        gif_path = resource_path("tutorial.gif")
+        if not os.path.exists(gif_path):
+            gif_label.configure(text="Tutorial animation not found.\nPlease ensure 'tutorial.gif' is packed into the app.")
+            return
+
+        try:
+            gif_image = Image.open(gif_path)
+            frames = []
+            durations = []
+
+            try:
+                while True:
+                    frame = gif_image.copy().convert("RGBA")
+                    w, h = frame.size
+                    target_w = win_w - 60
+                    target_h = int((h / w) * target_w)
+
+                    ctk_frame = ctk.CTkImage(light_image=frame, dark_image=frame, size=(target_w, target_h))
+                    frames.append(ctk_frame)
+                    frame_delay = gif_image.info.get('duration', 100)
+                    durations.append(frame_delay)
+                    gif_image.seek(len(frames))
+            except EOFError:
+                pass
+
+            if frames:
+                def animate(frame_idx):
+                    if not tut_window.winfo_exists(): return
+                    gif_label.configure(image=frames[frame_idx], text="")
+                    next_idx = (frame_idx + 1) % len(frames)
+                    delay = durations[frame_idx]
+                    tut_window.after(delay, animate, next_idx)
+
+                animate(0)
+        except Exception as e:
+            gif_label.configure(text=f"Error loading animation:\n{e}")
+
+    def upload_manual_cookies(self, dialog_window, browser_name):
+        file_path = filedialog.askopenfilename(
+            title="Select cookies.txt",
+            filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")]
+        )
+
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'r', encoding='utf-8') as src:
+                cookie_data = src.read()
+
+            if "# Netscape HTTP Cookie File" not in cookie_data:
+                messagebox.showerror("Invalid File", "The selected file does not appear to be a valid Netscape cookies.txt file.")
+                return
+
+            master_cookie_file = os.path.join(APP_DATA_DIR, "master_cookies.txt")
+            with open(master_cookie_file, 'w', encoding='utf-8') as dst:
+                dst.write(cookie_data)
+
+            self.fb_cookie_path = master_cookie_file
+            self.yt_cookie_path = master_cookie_file
+            self.impersonate_target = "chrome"
+
+            self.active_browser_name = browser_name
+            with open(os.path.join(APP_DATA_DIR, "active_profile.txt"), 'w') as pf: pf.write(browser_name)
+
+            dialog_window.destroy()
+            self.show_mode_selection()
+
+        except Exception as e:
+            messagebox.showerror("Upload Error", f"Failed to process the cookie file.\n\nError: {e}")
 
     # ==========================================
     # 2. HUB / MODE SELECTION MENU
     # ==========================================
     def build_mode_interface(self):
-        # 1. Setup Full-Size Logo at Top Center (Replacing Pauly)
         try:
             logo_raw = Image.open(resource_path("logo.png"))
             orig_w, orig_h = logo_raw.size
@@ -371,78 +585,63 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
 
             self.hub_logo_label = ctk.CTkLabel(self.mode_frame, image=logo_img, text="")
             self.hub_logo_label.grid(row=0, column=0, pady=(60, 10))
-        except Exception:
-            pass
+        except Exception: pass
 
-        # 2. Main Title Label (Added pady=80 on the bottom to push buttons down)
         top_pad = 10 if hasattr(self, 'hub_logo_label') else 180
         ctk.CTkLabel(self.mode_frame, text="Select Mode", font=ctk.CTkFont(size=24, weight="bold")).grid(row=1, column=0, pady=(top_pad, 80))
 
-        # 3. Button Frame & Button Icons
         btn_frame = ctk.CTkFrame(self.mode_frame, fg_color="transparent")
         btn_frame.grid(row=2, column=0)
 
         try:
             scope_raw = Image.open(resource_path("scope.png"))
             scope_icon = ctk.CTkImage(light_image=scope_raw, dark_image=scope_raw, size=(56, 56))
-        except Exception:
-            scope_icon = None
+        except Exception: scope_icon = None
 
         try:
             chest_raw = Image.open(resource_path("chest.png"))
             chest_icon = ctk.CTkImage(light_image=chest_raw, dark_image=chest_raw, size=(28, 28))
-        except Exception:
-            chest_icon = None
+        except Exception: chest_icon = None
 
-        # 4. Create the Buttons
         ctk.CTkButton(
-            btn_frame,
-            text=" Search YouTube",
-            image=scope_icon,
-            command=self.open_search_mode,
-            width=240,
-            height=60,
-            font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color="#6c4fa1",
-            hover_color="#58266d",
-            text_color="#ffffff"
+            btn_frame, text=" Search YouTube", image=scope_icon, command=self.open_search_mode,
+            width=240, height=60, font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color="#6c4fa1", hover_color="#58266d", text_color="#ffffff"
         ).grid(row=0, column=0, padx=15)
 
-        # We assign this to a variable (save_btn) so we can attach Pauly to it!
         save_btn = ctk.CTkButton(
-            btn_frame,
-            text=" Save Media",
-            image=chest_icon,
-            command=self.open_download_mode,
-            width=240,
-            height=60,
-            font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color="#6c4fa1",
-            hover_color="#58266d",
-            text_color="#ffffff"
+            btn_frame, text=" Save Media", image=chest_icon, command=self.open_download_mode,
+            width=240, height=60, font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color="#6c4fa1", hover_color="#58266d", text_color="#ffffff"
         )
         save_btn.grid(row=0, column=1, padx=15)
 
-        # 5. Perch Pauly on the Save Media Button
         try:
             pauly_raw = Image.open(resource_path("pauly.png"))
-            target_h_pauly = 140 # Restored to your original larger size!
+            target_h_pauly = 140
             target_w_pauly = int((pauly_raw.width / pauly_raw.height) * target_h_pauly)
             pauly_img = ctk.CTkImage(light_image=pauly_raw, dark_image=pauly_raw, size=(target_w_pauly, target_h_pauly))
 
-            # CHANGE 1: Set the master to self.mode_frame to prevent clipping
-            # Explicitly set fg_color to transparent so it blends with the background
             pauly_label = ctk.CTkLabel(self.mode_frame, image=pauly_img, text="", fg_color="transparent")
-
-            # CHANGE 2: Use rely=0.0 and anchor="s" to rest the bounding box exactly on top of the button
-            # relx=0.85 shifts him nicely to the right side of the button
             pauly_label.place(in_=save_btn, relx=0.85, rely=0.0, anchor="s")
-        except Exception:
-            pass
+        except Exception: pass
+
+        self.profile_display_label = ctk.CTkLabel(
+            self.mode_frame, text="Active Profile: Unknown", text_color="gray", font=ctk.CTkFont(size=12, slant="italic")
+        )
+        self.profile_display_label.place(relx=0.96, rely=0.03, anchor="ne")
+
+        switch_btn = ctk.CTkButton(
+            self.mode_frame, text="Switch / Reset", command=self.switch_browser,
+            width=120, height=24, font=ctk.CTkFont(size=11), fg_color="#444444", hover_color="#555555"
+        )
+        switch_btn.place(relx=0.96, rely=0.07, anchor="ne")
 
     def show_mode_selection(self):
         self.hide_all_frames()
         self.mode_frame.grid(row=0, column=0, sticky="nsew")
+        if hasattr(self, 'active_browser_name'):
+            self.profile_display_label.configure(text=f"Active Profile: {self.active_browser_name}")
 
     def open_search_mode(self):
         self.hide_all_frames()
@@ -452,12 +651,10 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         self.hide_all_frames()
         self.download_frame.grid(row=0, column=0, sticky="nsew")
 
-
     # ==========================================
     # 3. YOUTUBE TRANSCRIPT SEARCH ENGINE
     # ==========================================
     def build_search_interface(self):
-        # Update row configurations to allow the table to expand correctly with the new cards
         self.search_frame.grid_rowconfigure(0, weight=0)
         self.search_frame.grid_rowconfigure(1, weight=0)
         self.search_frame.grid_rowconfigure(2, weight=0)
@@ -470,41 +667,32 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         dropdown_hover = "#21a394"
         dropdown_text = "#2b2b2b"
 
-        # --- Top Navigation Bar ---
         top_bar = ctk.CTkFrame(self.search_frame, fg_color="transparent")
         top_bar.grid(row=0, column=0, sticky="ew", pady=(0, 10), padx=20)
-
-        # Create 3 equal columns to balance the layout perfectly
         top_bar.grid_columnconfigure(0, weight=1)
         top_bar.grid_columnconfigure(1, weight=1)
         top_bar.grid_columnconfigure(2, weight=1)
 
-        # Left: Back Button
-        ctk.CTkButton(top_bar, text="⬅ Back to Menu", command=self.show_mode_selection, width=120, height=32, fg_color="#444444", hover_color="#555555").grid(row=0, column=0, sticky="w")
-
-        # Right: Title
+        ctk.CTkButton(top_bar, text="? Back to Menu", command=self.show_mode_selection, width=120, height=32, fg_color="#444444", hover_color="#555555").grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(top_bar, text="YouTube Transcript Search", font=ctk.CTkFont(size=18, weight="bold"), text_color=card_title_color).grid(row=0, column=2, sticky="e")
 
-        # --- Card 1: Search Query Settings ---
         self.query_card = ctk.CTkFrame(self.search_frame, corner_radius=10)
         self.query_card.grid(row=1, column=0, sticky="ew", pady=(5, 5), padx=20)
         self.query_card.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(self.query_card, text="Search Query Settings", font=ctk.CTkFont(size=13, weight="bold"), text_color=card_title_color).grid(row=0, column=0, padx=15, pady=(12, 5), sticky="w")
-
         ctk.CTkLabel(self.query_card, text="Keywords (comma-separated):").grid(row=1, column=0, padx=15, pady=(5, 12), sticky="w")
         self.keywords_entry = ctk.CTkEntry(self.query_card, placeholder_text="e.g. LifeWise, LifeWise Academy")
         self.keywords_entry.grid(row=1, column=1, padx=15, pady=(5, 12), sticky="ew")
         self.keywords_entry.insert(0, "LifeWise, LifeWise Academy")
         self.create_context_menu(self.keywords_entry)
 
-        # --- Card 2: Advanced Search Filters ---
         self.filters_card = ctk.CTkFrame(self.search_frame, corner_radius=10)
         self.filters_card.grid(row=2, column=0, sticky="ew", pady=(5, 5), padx=20)
 
         ctk.CTkLabel(self.filters_card, text="Advanced Search Filters", font=ctk.CTkFont(size=13, weight="bold"), text_color=card_title_color).grid(row=0, column=0, padx=15, pady=12, sticky="w")
-
         ctk.CTkLabel(self.filters_card, text="Look Back:").grid(row=0, column=1, padx=(5, 2), pady=12)
+
         self.lookback_var = ctk.StringVar(value="Any Time")
         self.lookback_dropdown = ctk.CTkOptionMenu(
             self.filters_card, variable=self.lookback_var,
@@ -523,39 +711,22 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         ctk.CTkLabel(self.filters_card, text="Max Hits:").grid(row=0, column=5, padx=(5, 2), pady=12)
         self.max_hits_entry = ctk.CTkEntry(self.filters_card, width=70)
         self.max_hits_entry.grid(row=0, column=6, padx=(0, 15), pady=12)
-        self.max_hits_entry.insert(0, "50") # Default stops after finding 50 matches
+        self.max_hits_entry.insert(0, "50")
         self.create_context_menu(self.max_hits_entry)
 
-        # --- Search Controls & Status ---
         control_frame = ctk.CTkFrame(self.search_frame, fg_color="transparent")
         control_frame.grid(row=3, column=0, sticky="ew", padx=20, pady=(10, 5))
-        # Give column 0 weight so it expands and pushes column 1 (the button) to the far right
         control_frame.grid_columnconfigure(0, weight=1)
 
-        # Status label now on the left (column 0)
-        self.search_status_label = ctk.CTkLabel(
-            control_frame,
-            text="Ready to search.",
-            font=ctk.CTkFont(size=12, slant="italic"),
-            text_color="gray"
-        )
+        self.search_status_label = ctk.CTkLabel(control_frame, text="Ready to search.", font=ctk.CTkFont(size=12, slant="italic"), text_color="gray")
         self.search_status_label.grid(row=0, column=0, sticky="w")
 
-        # Search button now on the right (column 1)
         self.search_btn = ctk.CTkButton(
-            control_frame,
-            text="Start YouTube Search",
-            command=self.start_search_thread,
-            height=38,
-            width=200,
-            fg_color="#6c4fa1",
-            hover_color="#58266d",
-            text_color="#ffffff",
-            font=ctk.CTkFont(size=14, weight="bold")
+            control_frame, text="Start YouTube Search", command=self.start_search_thread,
+            height=38, width=200, fg_color="#6c4fa1", hover_color="#58266d", text_color="#ffffff", font=ctk.CTkFont(size=14, weight="bold")
         )
         self.search_btn.grid(row=0, column=1, sticky="e")
 
-        # --- Results Table ---
         self.results_frame = ctk.CTkFrame(self.search_frame, corner_radius=10)
         self.results_frame.grid(row=4, column=0, sticky="nsew", padx=20, pady=10)
         self.results_frame.grid_columnconfigure(0, weight=1)
@@ -591,7 +762,6 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         self.current_search_keywords = [k.strip() for k in raw_keywords.split(",") if k.strip()]
         self.transcript_cache.clear()
 
-        # Capture our new settings safely
         try:
             max_results = int(self.max_results_entry.get().strip())
             max_hits = int(self.max_hits_entry.get().strip())
@@ -604,21 +774,18 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         self.search_status_label.configure(text="Scraping YouTube for latest uploads...", text_color="yellow")
         for item in self.tree.get_children(): self.tree.delete(item)
 
-        # Pass the new variables to the worker
         threading.Thread(target=self.run_search_worker, args=(self.current_search_keywords, max_results, max_hits, look_back_choice), daemon=True).start()
 
     def run_search_worker(self, search_keywords, max_results, max_hits, look_back_choice):
-        # 1. Map the user's dropdown choice to YouTube's native date filter parameters
         lookback_map = {
-            "Any Time": "EgIQAQ%3D%3D",   # Videos only
-            "Today": "EgQIAhAB",          # Videos only, Today
-            "This Week": "EgQIAxAB",      # Videos only, This Week
-            "This Month": "EgQIBBAB",     # Videos only, This Month
-            "This Year": "EgQIBRAB"       # Videos only, This Year
+            "Any Time": "EgIQAQ%3D%3D",
+            "Today": "EgQIAhAB",
+            "This Week": "EgQIAxAB",
+            "This Month": "EgQIBBAB",
+            "This Year": "EgQIBRAB"
         }
         sp_param = lookback_map.get(look_back_choice, "EgIQAQ%3D%3D")
 
-        # 2. Build the exclusion list from the All-Time Master Sheet
         user_profile = os.path.expanduser('~')
         target_parent_dir = os.path.join(user_profile, 'Downloads', 'SEA Media Archiver', 'You Tube Search Results')
         master_filename = os.path.join(target_parent_dir, "All_Time_Matches.csv")
@@ -630,11 +797,8 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                     reader = csv.DictReader(f)
                     for row in reader:
                         url = row.get('YouTube URL', '')
-                        if 'v=' in url:
-                            # Extract just the ID so it's easy to compare
-                            excluded_video_ids.add(url.split('v=')[-1])
-            except Exception:
-                pass # If it fails to read, we just proceed with an empty exclusion list
+                        if 'v=' in url: excluded_video_ids.add(url.split('v=')[-1])
+            except Exception: pass
 
         ydl_opts = {'extract_flat': True, 'quiet': True, 'ignoreerrors': True, 'playlistend': max_results}
         all_videos_dict = {}
@@ -643,13 +807,11 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
             for keyword in search_keywords:
                 encoded_kw = urllib.parse.quote(keyword)
                 try:
-                    # Append our specific date filter parameter to the URL
                     search_results = ydl.extract_info(f"https://www.youtube.com/results?search_query={encoded_kw}&sp={sp_param}", download=False)
                     if search_results and 'entries' in search_results:
                         for entry in list(search_results['entries']):
                             if entry and entry.get('id'):
                                 vid_id = entry.get('id')
-                                # 3. Check if this video is already in our Master Sheet!
                                 if vid_id not in excluded_video_ids:
                                     all_videos_dict[vid_id] = {
                                         'title': entry.get('title', 'Untitled Video'),
@@ -707,13 +869,9 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
 
             except Exception: pass
 
-            # 4. Stop scanning if we have reached our Max Hits limit
-            if total_matches >= max_hits:
-                break
-
+            if total_matches >= max_hits: break
             time.sleep(random.uniform(1.5, 3.0))
 
-        # Updated CSV Export: Individual Sheet AND All-Time Master Sheet
         if matched_videos:
             os.makedirs(target_parent_dir, exist_ok=True)
             date_str = datetime.datetime.now().strftime("%Y%m%d_%H%M")
@@ -734,7 +892,6 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                 writer = csv.DictWriter(f, fieldnames=['Video Title', 'Channel', 'YouTube URL', 'Date Found'])
                 if not file_exists:
                     writer.writeheader()
-
                 for v in matched_videos:
                     writer.writerow({
                         'Video Title': v['title'],
@@ -749,14 +906,11 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         self.after(0, lambda: self.search_btn.configure(state="normal"))
 
     def view_highlighted_transcript(self):
-        """Creates a popup window to read the cached transcript and snaps to the first highlighted keyword."""
         selected = self.tree.selection()
         if not selected: return messagebox.showwarning("Selection Required", "Please select a video row first.")
 
-        # URL is at index 2 because Channel is at index 1
         video_title = self.tree.item(selected[0])["values"][0]
         video_url = self.tree.item(selected[0])["values"][2]
-
         transcript_text = self.transcript_cache.get(video_url, "Transcript data could not be found in cache.")
 
         dialog = ctk.CTkToplevel(self)
@@ -764,117 +918,71 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         dialog.geometry("700x650")
         dialog.transient(self)
 
-        # Apply the custom window icon
         try:
             dialog.after(200, lambda: dialog.iconphoto(False, self.tk_icon))
-        except Exception:
-            pass
+        except Exception: pass
 
         ctk.CTkLabel(dialog, text=video_title, font=ctk.CTkFont(size=14, weight="bold"), wraplength=650).pack(pady=(15, 5), padx=10)
-
         textbox = ctk.CTkTextbox(dialog, font=ctk.CTkFont(size=13), wrap="word")
         textbox.pack(fill="both", expand=True, padx=20, pady=(5, 15))
-
         textbox.insert("1.0", transcript_text)
-
-        # Setup the highlight tag
         textbox.tag_config("highlight", background="#38d8c3", foreground="#2b2b2b")
 
-        # Track the absolute earliest occurrence in the text box
         earliest_match = None
-
-        # Scan and tag the keywords
         for kw in self.current_search_keywords:
             start_pos = "1.0"
             while True:
                 start_pos = textbox.search(kw, start_pos, stopindex=tk.END, nocase=True)
-                if not start_pos:
-                    break
-
-                if not earliest_match or textbox.compare(start_pos, "<", earliest_match):
-                    earliest_match = start_pos
-
+                if not start_pos: break
+                if not earliest_match or textbox.compare(start_pos, "<", earliest_match): earliest_match = start_pos
                 end_pos = f"{start_pos}+{len(kw)}c"
                 textbox.tag_add("highlight", start_pos, end_pos)
                 start_pos = end_pos
 
-        textbox.configure(state="disabled") # Make read-only
+        textbox.configure(state="disabled")
+        if earliest_match: textbox.see(earliest_match)
 
-        # Snap the view to the first keyword hit
-        if earliest_match:
-            textbox.see(earliest_match)
-
-        # === UPDATED: Save Transcript Logic with Dedicated Folder ===
         def save_transcript_to_file():
-            # 1. Build the path to Downloads/SEA Media Archiver/You Tube Transcripts
             user_profile = os.path.expanduser('~')
             target_transcript_dir = os.path.join(user_profile, 'Downloads', 'SEA Media Archiver', 'You Tube Transcripts')
-
-            # 2. Ensure the directory exists
             os.makedirs(target_transcript_dir, exist_ok=True)
-
-            # 3. Clean the video title of invalid filename characters
             safe_title = "".join([c for c in video_title if c.isalpha() or c.isdigit() or c == ' ']).rstrip()
             default_filename = f"{safe_title[:50]}_Transcript.txt"
 
-            # 4. Open save dialog pointing to target_transcript_dir
             file_path = filedialog.asksaveasfilename(
-                parent=dialog,
-                title="Save Transcript As...",
-                initialdir=target_transcript_dir,
-                initialfile=default_filename,
-                defaultextension=".txt",
-                filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")]
+                parent=dialog, title="Save Transcript As...", initialdir=target_transcript_dir,
+                initialfile=default_filename, defaultextension=".txt", filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")]
             )
 
             if file_path:
                 try:
                     with open(file_path, "w", encoding="utf-8") as f:
-                        f.write(f"Title: {video_title}\n")
-                        f.write(f"URL: {video_url}\n")
-                        f.write(f"{'='*60}\n\n")
-                        f.write(transcript_text)
+                        f.write(f"Title: {video_title}\nURL: {video_url}\n{'='*60}\n\n{transcript_text}")
                     messagebox.showinfo("Success", "Transcript saved successfully!", parent=dialog)
                 except Exception as e:
                     messagebox.showerror("Save Error", f"Could not save file:\n{e}", parent=dialog)
 
-        # Add the Save Button at the bottom of the window
         save_btn = ctk.CTkButton(
-            dialog,
-            text="Save Transcript to Text File",
-            command=save_transcript_to_file,
-            fg_color="#6c4fa1",
-            hover_color="#58266d",
-            text_color="#ffffff",
-            font=ctk.CTkFont(weight="bold"),
-            height=36
+            dialog, text="Save Transcript to Text File", command=save_transcript_to_file,
+            fg_color="#6c4fa1", hover_color="#58266d", text_color="#ffffff", font=ctk.CTkFont(weight="bold"), height=36
         )
         save_btn.pack(pady=(0, 15))
 
     def open_in_youtube(self):
-        """Opens the selected link in the user's default web browser."""
         selected = self.tree.selection()
-        if not selected:
-            return messagebox.showwarning("Selection Required", "Please select a video row first.")
-        # Make sure this pulls from index [2] now!
+        if not selected: return messagebox.showwarning("Selection Required", "Please select a video row first.")
         webbrowser.open(self.tree.item(selected[0])["values"][2])
 
     def send_to_downloader(self):
-        """Passes the selected URL from Search directly into the Media Archiver!"""
         selected = self.tree.selection()
-        if not selected:
-            return messagebox.showwarning("Selection Required", "Please select a video row from the table first.")
-
-        # Make sure this pulls from index [2] now!
+        if not selected: return messagebox.showwarning("Selection Required", "Please select a video row from the table first.")
         video_url = self.tree.item(selected[0])["values"][2]
-
-        # Switch to download mode and insert the URL
         self.open_download_mode()
         self.url_entry.delete(0, tk.END)
         self.url_entry.insert(0, video_url)
 
     # ==========================================
-    # 4. SEA MEDIA AERCHIVER ENGINE (FULL APP_V49)
+    # 4. MEDIA ARCHIVER ENGINE
     # ==========================================
     def format_timestamp_input(self, event):
         widget = event.widget
@@ -962,8 +1070,8 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         btn_box.pack(pady=10)
 
         def open_folder_action():
-            if os.path.exists(target_folder): os.startfile(target_folder)
-            else: os.startfile(os.path.dirname(target_folder))
+            path_to_open = target_folder if os.path.exists(target_folder) else os.path.dirname(target_folder)
+            subprocess.call(["open", path_to_open])
             dialog.destroy()
 
         open_btn = ctk.CTkButton(btn_box, text="Open Folder", command=open_folder_action, width=130, height=36, fg_color="#6c4fa1", hover_color="#58266d", text_color="#ffffff", font=ctk.CTkFont(weight="bold"))
@@ -978,19 +1086,12 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         self.top_bar.grid_columnconfigure(1, weight=0)
         self.top_bar.grid_columnconfigure(2, weight=1)
 
-        # Back Button on the left
         back_btn = ctk.CTkButton(
-            self.top_bar,
-            text="⬅ Back to Menu",
-            command=self.show_mode_selection,
-            width=130,
-            height=32,
-            fg_color="#444444",
-            hover_color="#555555"
+            self.top_bar, text="? Back to Menu", command=self.show_mode_selection,
+            width=130, height=32, fg_color="#444444", hover_color="#555555"
         )
         back_btn.grid(row=0, column=0, sticky="nw")
 
-        # Centered Logo
         try:
             logo_file_path = resource_path("logo.png")
             raw_image = Image.open(logo_file_path)
@@ -1013,7 +1114,6 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         self.dropdown_hover = "#21a394"
         self.dropdown_text = "#2b2b2b"
 
-        # Media Export Settings Card
         self.media_card = ctk.CTkFrame(self.download_frame, corner_radius=10)
         self.media_card.grid(row=3, column=0, pady=6, padx=20, sticky="ew")
         ctk.CTkLabel(self.media_card, text="Media Export Settings", font=ctk.CTkFont(size=13, weight="bold"), text_color=card_title_color).grid(row=0, column=0, padx=(15, 15), pady=12, sticky="w")
@@ -1032,7 +1132,6 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         self.audio_checkbox = ctk.CTkCheckBox(self.media_card, text="Audio Only (MP3)", variable=self.audio_only_var, command=self.toggle_audio_only)
         self.audio_checkbox.grid(row=0, column=5, padx=(10, 15), pady=12)
 
-        # Subtitle Card
         self.sub_card = ctk.CTkFrame(self.download_frame, corner_radius=10)
         self.sub_card.grid(row=4, column=0, pady=6, padx=20, sticky="ew")
         ctk.CTkLabel(self.sub_card, text="Subtitles & Transcripts", font=ctk.CTkFont(size=13, weight="bold"), text_color=card_title_color).grid(row=0, column=0, padx=(15, 25), pady=12, sticky="w")
@@ -1043,7 +1142,6 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         self.transcript_checkbox = ctk.CTkCheckBox(self.sub_card, text="Save Transcript (.txt)", variable=self.transcript_var)
         self.transcript_checkbox.grid(row=0, column=2, padx=(15, 15), pady=12)
 
-        # Time Clip Card
         self.time_card = ctk.CTkFrame(self.download_frame, corner_radius=10)
         self.time_card.grid(row=5, column=0, pady=6, padx=20, sticky="ew")
         ctk.CTkLabel(self.time_card, text="Clip Section", font=ctk.CTkFont(size=13, weight="bold"), text_color=card_title_color).grid(row=0, column=0, padx=(15, 15), pady=12, sticky="w")
@@ -1126,7 +1224,7 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                 cmd.extend(["--cookies", self.fb_cookie_path])
 
             cmd.append(url)
-            process = subprocess.run(cmd, capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
+            process = subprocess.run(cmd, capture_output=True, text=True)
 
             if process.returncode == 0 and process.stdout:
                 data = json.loads(process.stdout)
@@ -1145,22 +1243,13 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
             self.after(0, lambda: threading.Thread(target=self.download_worker, args=(url,), daemon=True).start())
 
     def parse_srt_time(self, time_str):
-        """Converts timestamp strings (HH:MM:SS or HH:MM:SS,mmm) into float seconds."""
         time_str = time_str.strip().replace('.', ',')
         parts = time_str.split(':')
-        if len(parts) == 3:
-            h, m, s = parts
-        elif len(parts) == 2:
-            h = 0
-            m, s = parts
-        else:
-            return 0.0
-
-        if ',' in s:
-            sec, msec = s.split(',')
-        else:
-            sec, msec = s, '0'
-
+        if len(parts) == 3: h, m, s = parts
+        elif len(parts) == 2: h = 0; m, s = parts
+        else: return 0.0
+        if ',' in s: sec, msec = s.split(',')
+        else: sec, msec = s, '0'
         return int(h) * 3600 + int(m) * 60 + int(sec) + (int(msec) / 1000.0)
 
     def format_whisper_timestamp(self, seconds):
@@ -1174,7 +1263,6 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         try:
             srt_files = [f for f in os.listdir(folder_path) if f.lower().endswith(".srt")]
 
-            # Determine if the clip section feature is currently active
             use_clip = self.use_time_var.get()
             clip_start_sec = 0.0
             clip_end_sec = float('inf')
@@ -1183,16 +1271,13 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                 start_str = self.start_entry.get().strip() or "00:00:00"
                 end_str = self.end_entry.get().strip()
                 clip_start_sec = self.parse_srt_time(start_str)
-                if end_str:
-                    clip_end_sec = self.parse_srt_time(end_str)
+                if end_str: clip_end_sec = self.parse_srt_time(end_str)
 
-            # --- Whisper Local AI Fallback ---
             if not srt_files and (self.transcript_var.get() or self.srt_var.get()):
                 media_files = [f for f in os.listdir(folder_path) if f.lower().endswith(('.mp4', '.mkv', '.webm', '.mp3', '.mov', '.avi'))]
                 if media_files:
                     self.after(0, lambda: self.status_label.configure(text="Generating local AI transcript with built-in Whisper...", text_color="yellow"))
                     media_path = os.path.join(folder_path, media_files[0])
-
                     self.after(0, lambda: self.progress_bar.configure(mode="indeterminate"))
                     self.after(0, lambda: self.progress_bar.start())
 
@@ -1217,10 +1302,8 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
 
                     self.after(0, lambda: self.progress_bar.stop())
                     self.after(0, lambda: self.progress_bar.configure(mode="determinate"))
-
                 return
 
-            # --- Process Downloaded YouTube Subtitles (.srt) ---
             for file in srt_files:
                 srt_path = os.path.join(folder_path, file)
                 txt_path = os.path.splitext(srt_path)[0] + ".txt"
@@ -1228,7 +1311,6 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                 with open(srt_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
 
-                # Split SRT into individual blocks
                 blocks = re.split(r'\n\s*\n', content.strip())
                 filtered_srt_blocks = []
                 clean_dialogue = []
@@ -1236,8 +1318,7 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
 
                 for block in blocks:
                     lines = [l.strip() for l in block.splitlines() if l.strip()]
-                    if not lines:
-                        continue
+                    if not lines: continue
 
                     time_line_idx = -1
                     for idx, line in enumerate(lines):
@@ -1250,37 +1331,27 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                         start_sub_sec = self.parse_srt_time(time_parts[0])
                         end_sub_sec = self.parse_srt_time(time_parts[1])
 
-                        # 1. Skip blocks outside of our active clip timestamp range
                         if use_clip:
-                            if end_sub_sec < clip_start_sec or start_sub_sec > clip_end_sec:
-                                continue
-
-                            # Shift the timestamps back to 0 so they align with the clipped video
+                            if end_sub_sec < clip_start_sec or start_sub_sec > clip_end_sec: continue
                             start_sub_sec = max(0, start_sub_sec - clip_start_sec)
                             end_sub_sec = max(0, end_sub_sec - clip_start_sec)
 
-                        # Re-format the time line to strict SRT standard using our existing helper
                         new_start_str = self.format_whisper_timestamp(start_sub_sec)
                         new_end_str = self.format_whisper_timestamp(end_sub_sec)
                         time_line = f"{new_start_str} --> {new_end_str}"
-
-                        # Extract text lines below the time header
                         text_lines = lines[time_line_idx + 1:]
                         cleaned_block_text_lines = []
 
                         for line in text_lines:
                             clean_line = re.sub(r'<[^>]+>', '', line).strip()
-                            if clean_line:
-                                cleaned_block_text_lines.append(clean_line)
+                            if clean_line: cleaned_block_text_lines.append(clean_line)
 
                         full_block_text = " ".join(cleaned_block_text_lines)
 
-                        # 2. SRT Deduplication: Only add block if text is different from previous SRT block
                         if full_block_text and full_block_text != last_srt_text:
                             filtered_srt_blocks.append((time_line, cleaned_block_text_lines))
                             last_srt_text = full_block_text
 
-                        # 3. TXT Transcript Generation (Proven Working Logic)
                         for line in cleaned_block_text_lines:
                             display_line = line.capitalize() if line.isupper() else line
                             if not clean_dialogue or clean_dialogue[-1] != display_line:
@@ -1288,16 +1359,13 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                                     clean_dialogue.append("")
                                 clean_dialogue.append(display_line)
 
-                # Write out filtered .srt with clean sequential numbering (1, 2, 3...)
                 if self.srt_var.get():
                     with open(srt_path, 'w', encoding='utf-8') as f:
                         for idx, (t_line, txt_lines) in enumerate(filtered_srt_blocks, start=1):
                             f.write(f"{idx}\n{t_line}\n" + "\n".join(txt_lines) + "\n\n")
                 else:
-                    if os.path.exists(srt_path):
-                        os.remove(srt_path)
+                    if os.path.exists(srt_path): os.remove(srt_path)
 
-                # Write out filtered .txt
                 if self.transcript_var.get():
                     with open(txt_path, 'w', encoding='utf-8') as f:
                         f.write("\n".join(clean_dialogue))
@@ -1317,7 +1385,7 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                 if match: url = f"https://www.facebook.com/watch/?v={match.group(1)}"
                 elif "?" in url and "v=" not in url: url = url.split("?")[0]
 
-            user_profile = os.environ.get('USERPROFILE', os.path.expanduser('~'))
+            user_profile = os.environ.get('HOME', os.path.expanduser('~'))
             target_parent_dir = os.path.join(user_profile, 'Downloads', 'SEA Media Archiver')
 
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
@@ -1353,13 +1421,12 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
 
             cmd.append(url)
 
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, encoding='utf-8', errors='ignore', creationflags=CREATE_NO_WINDOW)
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, encoding='utf-8', errors='ignore')
             video_title = None
 
             for line in process.stdout:
                 console_output_logs.append(line.strip())
 
-                # Capture the video title for folder creation
                 if "[download] Destination:" in line:
                     video_title = os.path.basename(os.path.dirname(line.split("[download] Destination:")[-1].strip()))
                 elif "has already been downloaded" in line:
@@ -1369,35 +1436,18 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                     match = re.search(r'\[Merger\] Merging formats into "(.*?)"', line)
                     if match: video_title = os.path.basename(os.path.dirname(match.group(1).strip()))
 
-                # --- DYNAMIC STATUS PARSING ---
-
-                # 1. Handle Active Downloading
                 if "[download]" in line and "%" in line:
                     match = re.search(r'([0-9.]+)%', line)
                     if match:
                         percent = float(match.group(1)) / 100.0
                         self.after(0, lambda p=percent: self.progress_bar.set(p))
-
-                        if percent < 1.0:
-                            self.after(0, lambda p=percent: self.status_label.configure(text=f"Downloading... {int(p * 100)}%"))
-                        else:
-                            self.after(0, lambda: self.status_label.configure(text="Download 100%. Handing over to media processor..."))
-
-                # 2. Handle FFmpeg Post-Processing Phases
-                elif "[Merger]" in line:
-                    self.after(0, lambda: self.status_label.configure(text="FFmpeg: Merging video and audio streams..."))
-
-                elif "[ExtractAudio]" in line:
-                    self.after(0, lambda: self.status_label.configure(text="FFmpeg: Extracting and compiling audio track..."))
-
-                elif "[VideoRemuxer]" in line or "[Remuxer]" in line:
-                    self.after(0, lambda: self.status_label.configure(text="FFmpeg: Remuxing into final video format..."))
-
-                elif "[SubtitlesConvertor]" in line or "Converting subtitles" in line:
-                    self.after(0, lambda: self.status_label.configure(text="Processing subtitles and captions..."))
-
-                elif "Fixing" in line or "[Metadata]" in line:
-                    self.after(0, lambda: self.status_label.configure(text="Writing final file metadata..."))
+                        if percent < 1.0: self.after(0, lambda p=percent: self.status_label.configure(text=f"Downloading... {int(p * 100)}%"))
+                        else: self.after(0, lambda: self.status_label.configure(text="Download 100%. Handing over to media processor..."))
+                elif "[Merger]" in line: self.after(0, lambda: self.status_label.configure(text="FFmpeg: Merging video and audio streams..."))
+                elif "[ExtractAudio]" in line: self.after(0, lambda: self.status_label.configure(text="FFmpeg: Extracting and compiling audio track..."))
+                elif "[VideoRemuxer]" in line or "[Remuxer]" in line: self.after(0, lambda: self.status_label.configure(text="FFmpeg: Remuxing into final video format..."))
+                elif "[SubtitlesConvertor]" in line or "Converting subtitles" in line: self.after(0, lambda: self.status_label.configure(text="Processing subtitles and captions..."))
+                elif "Fixing" in line or "[Metadata]" in line: self.after(0, lambda: self.status_label.configure(text="Writing final file metadata..."))
 
             process.wait()
 
@@ -1417,14 +1467,10 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                 relevant_errors = [l for l in console_output_logs if "ERROR:" in l or "failed" in l.lower()]
                 error_details = "\n".join(relevant_errors[-3:]) if relevant_errors else "Unknown backend error."
 
-                # --- NEW: Detect yt-dlp cookie/login expiration ---
                 error_lower = error_details.lower()
                 if "sign in" in error_lower or "cookie" in error_lower or "403" in error_lower:
                     self.after(0, lambda: self.status_label.configure(text="Session Expired.", text_color="red"))
-                    self.after(0, lambda: messagebox.showwarning(
-                        "Authentication Failed",
-                        "Your browser session was rejected or has expired.\n\nPlease open your browser, log out of the website, log back in, and restart this application to refresh your cookies."
-                    ))
+                    self.after(0, self.handle_expired_cookies)
                 else:
                     self.after(0, lambda: self.status_label.configure(text="Download failed.", text_color="red"))
                     self.after(0, lambda err=error_details: messagebox.showerror("Extraction Error", f"The extraction process failed.\n\nDetails:\n{err}"))
@@ -1433,6 +1479,34 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
             self.after(0, lambda e=e: messagebox.showerror("System Error", f"An exception occurred:\n{str(e)}"))
         finally:
             self.after(0, lambda: self.download_btn.configure(state="normal"))
+
+    def handle_expired_cookies(self):
+        messagebox.showwarning(
+            "Authentication Expired",
+            "Your saved browser session has expired or was rejected by the server.\n\n"
+            "The Archiver will now return you to the Authentication screen so you can upload a fresh cookies.txt file."
+        )
+
+        master_cookie_file = os.path.join(APP_DATA_DIR, "master_cookies.txt")
+        if os.path.exists(master_cookie_file): os.remove(master_cookie_file)
+
+        profile_file = os.path.join(APP_DATA_DIR, "active_profile.txt")
+        if os.path.exists(profile_file): os.remove(profile_file)
+
+        self.fb_cookie_path = None
+        self.yt_cookie_path = None
+        self.show_auth_screen()
+
+    def switch_browser(self):
+        master_cookie_file = os.path.join(APP_DATA_DIR, "master_cookies.txt")
+        if os.path.exists(master_cookie_file): os.remove(master_cookie_file)
+
+        profile_file = os.path.join(APP_DATA_DIR, "active_profile.txt")
+        if os.path.exists(profile_file): os.remove(profile_file)
+
+        self.fb_cookie_path = None
+        self.yt_cookie_path = None
+        self.show_auth_screen()
 
 if __name__ == "__main__":
     app = SEAMediaArchiverUnifiedApp()
