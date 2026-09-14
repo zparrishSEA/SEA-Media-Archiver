@@ -28,7 +28,7 @@ import whisper
 
 # --- Auto-Updater Configuration ---
 APP_VERSION = "v2.5.0"
-GITHUB_REPO = "zparrishSEA/SVP-Pro-MAC"
+GITHUB_REPO = "zparrishSEA/SEA-Media-Archiver"
 # ----------------------------------
 
 # --- Dummy Console Patch for Windowed PyInstaller Apps ---
