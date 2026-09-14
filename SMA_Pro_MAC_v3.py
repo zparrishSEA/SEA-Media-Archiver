@@ -27,7 +27,7 @@ import ssl
 
 # --- Auto-Updater Configuration ---
 APP_VERSION = "v2.5.0"
-GITHUB_REPO = "zparrishSEA/SVP-Pro-MAC"
+GITHUB_REPO = "zparrishSEA/SEA-Media-Archiver"
 # ----------------------------------
 
 # --- MAC SSL PATCH ---
