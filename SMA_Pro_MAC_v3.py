@@ -26,9 +26,22 @@ import whisper
 import ssl
 
 # --- Auto-Updater Configuration ---
-APP_VERSION = "v2.5.0"
+APP_VERSION = "v3.0.0"
 GITHUB_REPO = "zparrishSEA/SEA-Media-Archiver"
 # ----------------------------------
+
+EXCLUDED_CHANNEL_URLS = [
+    "@LifeWiseGroup",
+    "@LifeWiseSpace",
+    "@lifewisenz"
+	"@LifeWiseDiscussions"
+	"@LifeWise_369"
+	"@LifewiseFinance"
+	"@LifeWiseSounds"
+	"@ranjeetkauradlakha"
+	"@lifewisearnoclaassen1217"
+	"@LifeWise_Tales"
+]
 
 # --- MAC SSL PATCH ---
 try:
@@ -811,11 +824,28 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
                     if search_results and 'entries' in search_results:
                         for entry in list(search_results['entries']):
                             if entry and entry.get('id'):
+
+                                # Grab the display name for the UI table
+                                uploader = entry.get('uploader', '').strip()
+
+                                # Pull the hidden URL and handle metadata safely
+                                uploader_url = str(entry.get('uploader_url', '')).lower()
+                                channel_url = str(entry.get('channel_url', '')).lower()
+                                uploader_id = str(entry.get('uploader_id', '')).lower()
+
+                                # Combine all URL/Handle markers into one string for easy checking
+                                channel_identifiers = f"{uploader_url} {channel_url} {uploader_id}"
+
+                                # --- BACKEND EXCLUSION FILTER (URL/HANDLE BASED) ---
+                                if any(ex_url.strip().lower() in channel_identifiers for ex_url in EXCLUDED_CHANNEL_URLS if ex_url.strip()):
+                                    continue  # Skip this video completely!
+                                # ---------------------------------------------------
+
                                 vid_id = entry.get('id')
                                 if vid_id not in excluded_video_ids:
                                     all_videos_dict[vid_id] = {
                                         'title': entry.get('title', 'Untitled Video'),
-                                        'channel': entry.get('uploader', 'Unknown Channel')
+                                        'channel': uploader or 'Unknown Channel'
                                     }
                 except Exception: pass
 
@@ -1009,19 +1039,57 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
     def show_stream_selection_dialog(self, entries):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Select Video Stream")
-        dialog.geometry("540x440")
+        dialog.geometry("540x480")
         dialog.resizable(False, False)
         dialog.transient(self)
         dialog.grab_set()
 
+        try:
+            dialog.after(200, lambda: dialog.iconphoto(False, self.tk_icon))
+        except Exception:
+            pass
+
+        # Center the dialog on screen
         x = self.winfo_x() + (self.winfo_width() // 2) - 270
-        y = self.winfo_y() + (self.winfo_height() // 2) - 220
+        y = self.winfo_y() + (self.winfo_height() // 2) - 240
         dialog.geometry(f"+{x}+{y}")
 
-        header_label = ctk.CTkLabel(dialog, text=f"Multiple Streams Detected ({len(entries)})", font=ctk.CTkFont(size=15, weight="bold"), text_color="#38d8c3")
-        header_label.pack(pady=(15, 10))
+        # --- Header Frame (Title on Left, Download All on Right) ---
+        header_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        header_frame.pack(fill="x", padx=20, pady=(15, 10))
 
-        scroll_frame = ctk.CTkScrollableFrame(dialog, width=490, height=340)
+        header_label = ctk.CTkLabel(
+            header_frame,
+            text=f"Multiple Streams Detected ({len(entries)})",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color="#38d8c3"
+        )
+        header_label.pack(side="left")
+
+        # Download All Action
+        def download_all_handler():
+            urls = [entry.get("url") or entry.get("webpage_url") for entry in entries if entry]
+            urls = [u for u in urls if u]
+            dialog.destroy()
+            self.download_btn.configure(state="disabled")
+            threading.Thread(target=self.batch_download_worker, args=(urls,), daemon=True).start()
+
+        dl_all_btn = ctk.CTkButton(
+            header_frame,
+            text="Download All",
+            command=download_all_handler,
+            width=120,
+            height=32,
+            fg_color="#6c4fa1",
+            hover_color="#58266d",
+            text_color="#ffffff",
+            font=ctk.CTkFont(weight="bold")
+        )
+        dl_all_btn.pack(side="right")
+        # -----------------------------------------------------------
+
+        # Scrollable area listing each individual video stream
+        scroll_frame = ctk.CTkScrollableFrame(dialog, width=490, height=370)
         scroll_frame.pack(padx=15, pady=(0, 15), fill="both", expand=True)
 
         for idx, entry in enumerate(entries, start=1):
@@ -1375,7 +1443,7 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
             self.after(0, lambda: self.progress_bar.stop())
             self.after(0, lambda: self.progress_bar.configure(mode="determinate"))
 
-    def download_worker(self, url):
+    def download_worker(self, url, is_batch=False):
         console_output_logs = []
         try:
             if "facebook.com" in url or "fb.watch" in url:
@@ -1462,7 +1530,10 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
 
                 self.after(0, lambda: self.progress_bar.set(1.0))
                 self.after(0, lambda: self.status_label.configure(text="Download Complete!", text_color="green"))
-                self.after(0, lambda f=specific_folder: self.show_success_dialog(f))
+
+                # Only show single success popup if NOT part of a batch
+                if not is_batch:
+                    self.after(0, lambda f=specific_folder: self.show_success_dialog(f))
             else:
                 relevant_errors = [l for l in console_output_logs if "ERROR:" in l or "failed" in l.lower()]
                 error_details = "\n".join(relevant_errors[-3:]) if relevant_errors else "Unknown backend error."
@@ -1478,7 +1549,30 @@ class SEAMediaArchiverUnifiedApp(ctk.CTk):
         except Exception as e:
             self.after(0, lambda e=e: messagebox.showerror("System Error", f"An exception occurred:\n{str(e)}"))
         finally:
-            self.after(0, lambda: self.download_btn.configure(state="normal"))
+            # Only re-enable download button if NOT part of a batch loop
+            if not is_batch:
+                self.after(0, lambda: self.download_btn.configure(state="normal"))
+
+    def batch_download_worker(self, urls):
+        """Sequentially downloads all URLs from a playlist/batch without UI interruptions."""
+        total = len(urls)
+        user_profile = os.environ.get('USERPROFILE', os.environ.get('HOME', os.path.expanduser('~')))
+        target_parent_dir = os.path.join(user_profile, 'Downloads', 'SEA Media Archiver')
+
+        for idx, url in enumerate(urls, start=1):
+            self.after(0, lambda i=idx, t=total: self.status_label.configure(
+                text=f"Batch Download ({i}/{t}): Preparing stream...", text_color="cyan"
+            ))
+            # Execute download worker in batch mode
+            self.download_worker(url, is_batch=True)
+            time.sleep(1)
+
+        # Finalize batch state
+        self.after(0, lambda: self.download_btn.configure(state="normal"))
+        self.after(0, lambda: self.status_label.configure(
+            text=f"Batch Download Complete ({total} items)! ", text_color="green"
+        ))
+        self.after(0, lambda: self.show_success_dialog(target_parent_dir))
 
     def handle_expired_cookies(self):
         messagebox.showwarning(
